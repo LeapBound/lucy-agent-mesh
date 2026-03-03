@@ -1,38 +1,51 @@
 # lucy-agent-mesh
 
-去中心化（无中心权威节点）的本地 TypeScript Agent Mesh。
+> 给每个 Agent 一个“本地大脑”，而不是把一切交给中心服务器。
 
-每个 Agent 跑一个本地 `node-daemon`：
-- 本地持久化：SQLite
-- 本地身份：`nodeId` + `displayName`
+`lucy-agent-mesh` 是一个 **去中心化、本地优先、TypeScript 原生** 的 Agent 通信骨架：
+- 每个 Agent 都跑自己的本地节点（`node-daemon`）
+- 每个节点都有自己的身份、存储、时钟、通讯录
+- 节点之间直接同步，不依赖中心消息中枢
+- 可以直接被 Codex / Claude Code 接入
+
+如果你想做的是：**多 Agent 协作系统、AI 自动化网络、离线可恢复的 Agent 通信层**，这就是一个能跑、能改、能扩展的起点。
+
+---
+
+## 为什么开发者会喜欢它
+
+- **去中心化而不复杂**：没有中心消息服务器，依然能做增量同步和有序回放
+- **本地优先**：每个节点本地 SQLite，断网/重启后可恢复
+- **工程可控**：TypeScript monorepo，边界清晰，便于重构和扩展
+- **AI 友好**：内置 MCP（stdio）+ SDK，Codex/Claude 直接调用
+- **防误发机制**：直发必须指定 `recipientNodeId`，并支持通讯录备注（alias/role/capabilities/notes）
+
+---
+
+## 关键能力（MVP）
+
+- 本地身份：`nodeId + displayName`
 - 消息签名：Ed25519
-- 幂等：`(sender_id, client_msg_id)`
+- 幂等保障：`(sender_id, client_msg_id)`
+- 去中心化排序：Lamport + 确定性排序
 - 增量同步：`frontier(sender_id -> lamport)`
 - 实时通知：WebSocket
+- 直发路由：按 `recipientNodeId` 定位
+- 通讯录：本地维护 Agent 元信息，减少误发
 
-> 这个仓库是本地优先，不依赖 Docker。
-> 运行时依赖 Node 内置 `node:sqlite`（Node.js 22+）。
+> 不依赖 Docker。运行时使用 Node 内置 `node:sqlite`（Node.js 22+，建议 24+）。
 
-## 前置环境
+---
 
-- Node.js 22+（建议 24+）
-- pnpm 10+
+## 快速开始（3 分钟起两个节点）
 
-## 目录结构
-
-- `apps/node-daemon`：每个节点进程（HTTP + WebSocket + P2P）
-- `apps/mcp-server`：MCP 工具服务（可被 Codex / Claude Code 调用）
-- `packages/core`：事件模型、签名、排序、校验
-- `packages/storage-sqlite`：SQLite 持久化实现
-- `packages/sdk`：调用 `node-daemon` 的 TypeScript SDK
-
-## 1. 安装
+### 1) 安装
 
 ```bash
 pnpm install
 ```
 
-## 2. 启动两个去中心化节点
+### 2) 启动两个去中心化节点
 
 终端 A：
 
@@ -48,9 +61,9 @@ NODE_PORT=7011 NODE_NAME=agent-beta PEER_URLS=http://127.0.0.1:7010 pnpm dev
 
 默认数据目录：`.local/node-<port>/mesh.sqlite`
 
-## 3. 最小联调（无中心服务器）
+### 3) 发送与同步（无中心服务器）
 
-1) 在 7010 创建会话：
+在 7010 创建会话：
 
 ```bash
 curl -s http://127.0.0.1:7010/v1/conversations \
@@ -58,7 +71,7 @@ curl -s http://127.0.0.1:7010/v1/conversations \
   -d '{"conversationId":"demo-room"}' | jq
 ```
 
-2) 在 7010 发送消息：
+在 7010 发消息：
 
 ```bash
 curl -s http://127.0.0.1:7010/v1/messages \
@@ -66,7 +79,7 @@ curl -s http://127.0.0.1:7010/v1/messages \
   -d '{"conversationId":"demo-room","content":"hello from 7010"}' | jq
 ```
 
-3) 在 7011 主动拉取同步：
+在 7011 拉同步：
 
 ```bash
 curl -s http://127.0.0.1:7011/v1/peers/sync \
@@ -74,27 +87,21 @@ curl -s http://127.0.0.1:7011/v1/peers/sync \
   -d '{"conversationId":"demo-room"}' | jq
 ```
 
-4) 在 7011 查看消息：
+在 7011 查看消息：
 
 ```bash
 curl -s "http://127.0.0.1:7011/v1/conversations/demo-room/events?after=0&limit=50" | jq
 ```
 
-5) 在 7010 查看已知 agent（拿 recipient 的 `nodeId`）：
+### 4) 直发 + 通讯录（避免发错）
+
+查看已知 agent，拿目标 `nodeId`：
 
 ```bash
 curl -s http://127.0.0.1:7010/v1/agents | jq
 ```
 
-6) 在 7010 直接给某个 agent 发私信（自动派生 DM 会话）：
-
-```bash
-curl -s http://127.0.0.1:7010/v1/messages/direct \
-  -H "content-type: application/json" \
-  -d '{"recipientNodeId":"<target-node-id>","content":"hi direct"}' | jq
-```
-
-7) 给该 agent 记一条通讯录备注（避免后续发错）：
+给目标打通讯录标签：
 
 ```bash
 curl -s http://127.0.0.1:7010/v1/contacts \
@@ -102,7 +109,73 @@ curl -s http://127.0.0.1:7010/v1/contacts \
   -d '{"nodeId":"<target-node-id>","alias":"beta","role":"test-agent","capabilities":"sync,validation","notes":"负责测试与校验"}' | jq
 ```
 
-## 4. HTTP API（本地客户端）
+按 `recipientNodeId` 发私信（自动派生 DM 会话 ID）：
+
+```bash
+curl -s http://127.0.0.1:7010/v1/messages/direct \
+  -H "content-type: application/json" \
+  -d '{"recipientNodeId":"<target-node-id>","content":"hi direct"}' | jq
+```
+
+> 若 `recipientNodeId` 未知，接口会返回 400，阻止盲发。
+
+---
+
+## Codex / Claude Code 集成
+
+### MCP（stdio）
+
+先确保本地节点已启动，再启动 MCP 进程：
+
+```bash
+NODE_API_URL=http://127.0.0.1:7010 pnpm dev:mcp
+```
+
+当前 MCP 是 **stdio transport**（不是 HTTP server 形式）。
+
+可用 MCP tools：
+- `whoami`
+- `set_display_name`
+- `list_agents`
+- `list_contacts`
+- `upsert_contact`
+- `create_conversation`
+- `send_message`
+- `send_direct_message`
+- `send_ack`
+- `list_events`
+- `add_peer`
+- `sync_from_peers`
+
+### SDK
+
+```ts
+import { MeshNodeClient } from "@lucy/sdk";
+
+const client = new MeshNodeClient({ baseUrl: "http://127.0.0.1:7010" });
+
+await client.setDisplayName("agent-alpha");
+await client.sendDirectMessage({
+  recipientNodeId: "<target-node-id>",
+  content: "hello"
+});
+```
+
+---
+
+## 架构一览
+
+- `apps/node-daemon`：每个节点进程（HTTP + WS + P2P）
+- `apps/mcp-server`：面向 AI 工具的 MCP 入口（stdio）
+- `packages/core`：事件模型、签名、排序、校验
+- `packages/storage-sqlite`：SQLite 持久化 + peer 目录 + 通讯录
+- `packages/sdk`：调用节点 API 的 TypeScript 客户端
+
+---
+
+## API 概览
+
+### 本地客户端 API
 
 - `GET /healthz`
 - `GET /v1/node`
@@ -121,52 +194,16 @@ curl -s http://127.0.0.1:7010/v1/contacts \
 - `POST /v1/peers/sync`
 - `WS /ws`
 
-## 5. P2P API（节点之间）
+### 节点间 P2P API
 
 - `GET /p2p/conversations`
 - `GET /p2p/node-info`
 - `POST /p2p/events`
 - `POST /p2p/sync`
 
-## 6. Codex / Claude Code 集成
+---
 
-### 6.1 通过 MCP
-
-先确保本地节点已启动，然后启动 MCP 服务：
-
-```bash
-NODE_API_URL=http://127.0.0.1:7010 pnpm dev:mcp
-```
-
-> 当前 MCP 实现是 `stdio` transport（不是 HTTP server 形式）。
-
-MCP tools:
-- `whoami`
-- `set_display_name`
-- `list_agents`
-- `list_contacts`
-- `upsert_contact`
-- `create_conversation`
-- `send_message`
-- `send_direct_message`
-- `send_ack`
-- `list_events`
-- `add_peer`
-- `sync_from_peers`
-
-### 6.2 通过 SDK
-
-```ts
-import { MeshNodeClient } from "@lucy/sdk";
-
-const client = new MeshNodeClient({ baseUrl: "http://127.0.0.1:7010" });
-await client.sendMessage({
-  conversationId: "demo-room",
-  content: "hello"
-});
-```
-
-## 7. 环境变量
+## 环境变量
 
 `apps/node-daemon`:
 - `NODE_HOST`（默认 `127.0.0.1`）
@@ -180,8 +217,22 @@ await client.sendMessage({
 `apps/mcp-server`:
 - `NODE_API_URL`（默认 `http://127.0.0.1:7010`）
 
-## 8. 设计取舍（MVP）
+---
 
-- 不使用中心排序节点，改为每个会话的 Lamport 时钟 + 确定性排序。
-- 不使用中心数据库，每个节点本地持久化，节点之间做 frontier 增量同步。
-- 先做点对点同步和签名校验，后续可加入 NAT 穿透/中继发现（不承载消息权威）。
+## 设计取舍（当前阶段）
+
+- 不用中心排序节点：用会话内 Lamport 时钟做可重放顺序
+- 不用中心数据库：每节点本地存储，节点间增量同步
+- 先保证可运行和可扩展：后续可加 NAT 穿透、发现服务、策略控制
+
+---
+
+## 想一起做大它？
+
+欢迎提 PR / Issue，一起把它打磨成真正可用于生产的 Agent Mesh 基础设施：
+- 更强的身份与信任模型
+- 更丰富的路由策略
+- 更好用的运维与可观测性
+- 更完善的测试矩阵
+
+如果你对“AI Agent 原生分布式通信”有兴趣，欢迎来一起造。
