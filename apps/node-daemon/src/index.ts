@@ -33,6 +33,27 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (method === "POST" && requestUrl.pathname === "/v1/node/profile") {
+      const body = await readJsonBody<{ displayName?: string }>(
+        request,
+        config.maxBodyBytes
+      );
+
+      if (!body.displayName) {
+        sendError(response, 400, "displayName is required");
+        return;
+      }
+
+      const displayName = meshNode.setDisplayName(body.displayName);
+      sendJson(response, 200, { displayName });
+      return;
+    }
+
+    if (method === "GET" && requestUrl.pathname === "/v1/agents") {
+      sendJson(response, 200, { agents: meshNode.listAgents() });
+      return;
+    }
+
     if (method === "POST" && requestUrl.pathname === "/v1/conversations") {
       const body = await readJsonBody<{ conversationId?: string }>(
         request,
@@ -57,8 +78,8 @@ const server = http.createServer(async (request, response) => {
         return;
       }
 
-      const url = meshNode.addPeer(body.url);
-      sendJson(response, 200, { url });
+      const result = await meshNode.addPeer(body.url);
+      sendJson(response, 200, result);
       return;
     }
 
@@ -99,6 +120,28 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (method === "POST" && requestUrl.pathname === "/v1/messages/direct") {
+      const body = await readJsonBody<{
+        recipientNodeId?: string;
+        content?: string;
+        clientMsgId?: string;
+      }>(request, config.maxBodyBytes);
+
+      if (!body.recipientNodeId || !body.content) {
+        sendError(response, 400, "recipientNodeId and content are required");
+        return;
+      }
+
+      const result = meshNode.sendDirectMessage({
+        recipientNodeId: body.recipientNodeId,
+        content: body.content,
+        clientMsgId: body.clientMsgId
+      });
+
+      sendJson(response, 200, result);
+      return;
+    }
+
     if (method === "POST" && requestUrl.pathname === "/v1/messages/ack") {
       const body = await readJsonBody<{
         conversationId?: string;
@@ -127,6 +170,11 @@ const server = http.createServer(async (request, response) => {
       sendJson(response, 200, {
         conversations: meshNode.listConversations()
       });
+      return;
+    }
+
+    if (method === "GET" && requestUrl.pathname === "/p2p/node-info") {
+      sendJson(response, 200, meshNode.getPublicNodeInfo());
       return;
     }
 
@@ -215,10 +263,13 @@ const websocketServer = new WebSocketServer({
 });
 
 websocketServer.on("connection", (socket: WebSocket) => {
+  const nodeInfo = meshNode.getNodeInfo();
+
   socket.send(
     JSON.stringify({
       type: "hello",
-      nodeId: meshNode.identity.nodeId,
+      nodeId: nodeInfo.nodeId,
+      displayName: nodeInfo.displayName,
       now: new Date().toISOString()
     })
   );
@@ -246,6 +297,7 @@ server.listen(config.port, config.host, () => {
 
   console.log("[node-daemon] started", {
     nodeId: meshNode.identity.nodeId,
+    displayName: meshNode.getNodeInfo().displayName,
     baseUrl,
     dataDir: config.dataDir,
     peers: meshNode.listPeers().map((peer) => peer.url)

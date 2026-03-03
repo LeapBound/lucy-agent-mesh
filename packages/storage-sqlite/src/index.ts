@@ -22,6 +22,14 @@ export interface KnownPeer {
   lastSyncAt: string | null;
 }
 
+export interface PeerDirectoryEntry {
+  nodeId: string;
+  sourceUrl: string;
+  publicKeyB64: string;
+  displayName: string | null;
+  updatedAt: string;
+}
+
 interface EventRow {
   local_seq: number;
   id: string;
@@ -99,6 +107,32 @@ export class SQLiteMeshStore {
       );
 
     return identity;
+  }
+
+  public getLocalDisplayName(): string | null {
+    const row = this.db
+      .prepare(
+        `
+        SELECT display_name
+        FROM node_identity
+        WHERE id = 1
+        `
+      )
+      .get() as { display_name: string | null } | undefined;
+
+    return row?.display_name ?? null;
+  }
+
+  public setLocalDisplayName(displayName: string | null): void {
+    this.db
+      .prepare(
+        `
+        UPDATE node_identity
+        SET display_name = ?
+        WHERE id = 1
+        `
+      )
+      .run(displayName);
   }
 
   public createConversation(conversationId: string): void {
@@ -478,6 +512,91 @@ export class SQLiteMeshStore {
     }));
   }
 
+  public upsertPeerDirectoryEntry(input: {
+    nodeId: string;
+    sourceUrl: string;
+    publicKeyB64: string;
+    displayName: string | null;
+  }): void {
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO peer_directory (
+          node_id,
+          source_url,
+          public_key_b64,
+          display_name,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(node_id, source_url) DO UPDATE SET
+          public_key_b64 = excluded.public_key_b64,
+          display_name = excluded.display_name,
+          updated_at = excluded.updated_at
+        `
+      )
+      .run(
+        input.nodeId,
+        input.sourceUrl,
+        input.publicKeyB64,
+        input.displayName,
+        now
+      );
+  }
+
+  public listPeerDirectoryEntries(): PeerDirectoryEntry[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT
+          node_id,
+          source_url,
+          public_key_b64,
+          display_name,
+          updated_at
+        FROM peer_directory
+        ORDER BY updated_at DESC
+        `
+      )
+      .all() as Array<{
+      node_id: string;
+      source_url: string;
+      public_key_b64: string;
+      display_name: string | null;
+      updated_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      nodeId: row.node_id,
+      sourceUrl: row.source_url,
+      publicKeyB64: row.public_key_b64,
+      displayName: row.display_name,
+      updatedAt: row.updated_at
+    }));
+  }
+
+  public findPeerUrlsByNodeId(nodeId: string): string[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT source_url
+        FROM peer_directory
+        WHERE node_id = ?
+        ORDER BY updated_at DESC
+        `
+      )
+      .all(nodeId) as Array<{ source_url: string }>;
+
+    const unique = new Set<string>();
+
+    for (const row of rows) {
+      unique.add(row.source_url);
+    }
+
+    return [...unique];
+  }
+
   public isKnownSender(senderId: string, senderPubKey: string): boolean {
     return deriveNodeIdFromPublicKey(senderPubKey) === senderId;
   }
@@ -530,6 +649,7 @@ export class SQLiteMeshStore {
         node_id TEXT NOT NULL,
         public_key_b64 TEXT NOT NULL,
         private_key_b64 TEXT NOT NULL,
+        display_name TEXT,
         created_at TEXT NOT NULL
       );
 
@@ -577,6 +697,33 @@ export class SQLiteMeshStore {
         created_at TEXT NOT NULL,
         last_sync_at TEXT
       );
+
+      CREATE TABLE IF NOT EXISTS peer_directory (
+        node_id TEXT NOT NULL,
+        source_url TEXT NOT NULL,
+        public_key_b64 TEXT NOT NULL,
+        display_name TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(node_id, source_url)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_peer_directory_node
+        ON peer_directory(node_id);
     `);
+
+    this.ensureOptionalColumns();
+  }
+
+  private ensureOptionalColumns(): void {
+    try {
+      this.db.exec("ALTER TABLE node_identity ADD COLUMN display_name TEXT;");
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !error.message.includes("duplicate column name")
+      ) {
+        throw error;
+      }
+    }
   }
 }

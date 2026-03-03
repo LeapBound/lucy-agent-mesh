@@ -25,6 +25,15 @@ export interface ListEventsResponse {
   events: Array<MeshEvent & { localSeq: number }>;
 }
 
+export interface KnownAgent {
+  nodeId: string;
+  publicKeyB64: string | null;
+  displayName: string | null;
+  self: boolean;
+  peerUrls: string[];
+  lastSeenAt: string | null;
+}
+
 export class MeshNodeClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -41,9 +50,20 @@ export class MeshNodeClient {
   public async whoAmI(): Promise<{
     nodeId: string;
     publicKeyB64: string;
+    displayName: string | null;
     peers: Array<{ url: string; createdAt: string; lastSyncAt: string | null }>;
   }> {
     return this.request("GET", "/v1/node");
+  }
+
+  public async setDisplayName(displayName: string): Promise<{
+    displayName: string;
+  }> {
+    return this.request("POST", "/v1/node/profile", { displayName });
+  }
+
+  public async listAgents(): Promise<{ agents: KnownAgent[] }> {
+    return this.request("GET", "/v1/agents");
   }
 
   public async createConversation(conversationId?: string): Promise<{
@@ -59,6 +79,19 @@ export class MeshNodeClient {
     event: MeshEvent;
   }> {
     return this.request("POST", "/v1/messages", request);
+  }
+
+  public async sendDirectMessage(request: {
+    recipientNodeId: string;
+    content: string;
+    clientMsgId?: string;
+  }): Promise<{
+    inserted: boolean;
+    event: MeshEvent;
+    conversationId: string;
+    routedPeerUrls: string[];
+  }> {
+    return this.request("POST", "/v1/messages/direct", request);
   }
 
   public async sendAck(request: SendAckRequest): Promise<{
@@ -90,7 +123,14 @@ export class MeshNodeClient {
     return this.request("GET", "/v1/peers");
   }
 
-  public async addPeer(url: string): Promise<{ url: string }> {
+  public async addPeer(url: string): Promise<{
+    url: string;
+    discovered?: {
+      nodeId: string;
+      publicKeyB64: string;
+      displayName: string | null;
+    };
+  }> {
     return this.request("POST", "/v1/peers/connect", { url });
   }
 

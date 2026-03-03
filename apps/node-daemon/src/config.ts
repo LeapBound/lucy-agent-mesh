@@ -5,6 +5,7 @@ export interface NodeConfig {
   port: number;
   dataDir: string;
   dbPath: string;
+  nodeName?: string;
   peers: string[];
   syncIntervalMs: number;
   maxBodyBytes: number;
@@ -43,6 +44,7 @@ export function loadNodeConfig(): NodeConfig {
     port,
     dataDir,
     dbPath: path.join(dataDir, "mesh.sqlite"),
+    nodeName: process.env.NODE_NAME?.trim() || undefined,
     peers: parsePeers(process.env.PEER_URLS),
     syncIntervalMs: parseNumber(process.env.SYNC_INTERVAL_MS, 15000),
     maxBodyBytes: parseNumber(process.env.MAX_BODY_BYTES, 512 * 1024)

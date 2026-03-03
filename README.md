@@ -4,6 +4,7 @@
 
 每个 Agent 跑一个本地 `node-daemon`：
 - 本地持久化：SQLite
+- 本地身份：`nodeId` + `displayName`
 - 消息签名：Ed25519
 - 幂等：`(sender_id, client_msg_id)`
 - 增量同步：`frontier(sender_id -> lamport)`
@@ -36,13 +37,13 @@ pnpm install
 终端 A：
 
 ```bash
-NODE_PORT=7010 PEER_URLS=http://127.0.0.1:7011 pnpm dev
+NODE_PORT=7010 NODE_NAME=agent-alpha PEER_URLS=http://127.0.0.1:7011 pnpm dev
 ```
 
 终端 B：
 
 ```bash
-NODE_PORT=7011 PEER_URLS=http://127.0.0.1:7010 pnpm dev
+NODE_PORT=7011 NODE_NAME=agent-beta PEER_URLS=http://127.0.0.1:7010 pnpm dev
 ```
 
 默认数据目录：`.local/node-<port>/mesh.sqlite`
@@ -79,12 +80,29 @@ curl -s http://127.0.0.1:7011/v1/peers/sync \
 curl -s "http://127.0.0.1:7011/v1/conversations/demo-room/events?after=0&limit=50" | jq
 ```
 
+5) 在 7010 查看已知 agent（拿 recipient 的 `nodeId`）：
+
+```bash
+curl -s http://127.0.0.1:7010/v1/agents | jq
+```
+
+6) 在 7010 直接给某个 agent 发私信（自动派生 DM 会话）：
+
+```bash
+curl -s http://127.0.0.1:7010/v1/messages/direct \
+  -H "content-type: application/json" \
+  -d '{"recipientNodeId":"<target-node-id>","content":"hi direct"}' | jq
+```
+
 ## 4. HTTP API（本地客户端）
 
 - `GET /healthz`
 - `GET /v1/node`
+- `POST /v1/node/profile`
+- `GET /v1/agents`
 - `POST /v1/conversations`
 - `POST /v1/messages`
+- `POST /v1/messages/direct`
 - `POST /v1/messages/ack`
 - `GET /v1/conversations/:id/events?after=0&limit=200`
 - `GET /v1/conversations/:id/frontier`
@@ -96,6 +114,7 @@ curl -s "http://127.0.0.1:7011/v1/conversations/demo-room/events?after=0&limit=5
 ## 5. P2P API（节点之间）
 
 - `GET /p2p/conversations`
+- `GET /p2p/node-info`
 - `POST /p2p/events`
 - `POST /p2p/sync`
 
@@ -111,8 +130,11 @@ NODE_API_URL=http://127.0.0.1:7010 pnpm dev:mcp
 
 MCP tools:
 - `whoami`
+- `set_display_name`
+- `list_agents`
 - `create_conversation`
 - `send_message`
+- `send_direct_message`
 - `send_ack`
 - `list_events`
 - `add_peer`
@@ -135,6 +157,7 @@ await client.sendMessage({
 `apps/node-daemon`:
 - `NODE_HOST`（默认 `127.0.0.1`）
 - `NODE_PORT`（默认 `7010`）
+- `NODE_NAME`（可选，本地 agent 显示名）
 - `DATA_DIR`（默认 `.local/node-<port>`）
 - `PEER_URLS`（逗号分隔）
 - `SYNC_INTERVAL_MS`（默认 `15000`）

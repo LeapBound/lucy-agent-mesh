@@ -13,6 +13,7 @@ import {
 } from "@lucy/core";
 import {
   SQLiteMeshStore,
+  type PeerDirectoryEntry,
   type KnownPeer,
   type StoredMeshEvent
 } from "@lucy/storage-sqlite";
@@ -44,17 +45,51 @@ export interface SyncSummary {
   conversations: string[];
 }
 
+export interface KnownAgent {
+  nodeId: string;
+  publicKeyB64: string | null;
+  displayName: string | null;
+  self: boolean;
+  peerUrls: string[];
+  lastSeenAt: string | null;
+}
+
+export interface DirectMessageInput {
+  recipientNodeId: string;
+  content: string;
+  clientMsgId?: string;
+}
+
+export interface DirectMessageResult {
+  inserted: boolean;
+  event: MeshEvent;
+  conversationId: string;
+  routedPeerUrls: string[];
+}
+
+interface PeerNodeInfo {
+  nodeId: string;
+  publicKeyB64: string;
+  displayName: string | null;
+}
+
 const MAX_SYNC_BATCH = 1000;
 
 export class MeshNode extends EventEmitter {
   private readonly store: SQLiteMeshStore;
 
   public readonly identity;
+  private localDisplayName: string | null;
 
   public constructor(config: NodeConfig) {
     super();
     this.store = new SQLiteMeshStore(config.dbPath);
     this.identity = this.store.getOrCreateIdentity();
+    this.localDisplayName = this.store.getLocalDisplayName();
+
+    if (config.nodeName) {
+      this.localDisplayName = this.setDisplayName(config.nodeName);
+    }
 
     for (const peer of config.peers) {
       this.store.upsertPeer(peer);
@@ -68,13 +103,56 @@ export class MeshNode extends EventEmitter {
   public getNodeInfo(): {
     nodeId: string;
     publicKeyB64: string;
+    displayName: string | null;
     peers: KnownPeer[];
   } {
     return {
       nodeId: this.identity.nodeId,
       publicKeyB64: this.identity.publicKeyB64,
+      displayName: this.localDisplayName,
       peers: this.store.listPeers()
     };
+  }
+
+  public getPublicNodeInfo(): PeerNodeInfo {
+    return {
+      nodeId: this.identity.nodeId,
+      publicKeyB64: this.identity.publicKeyB64,
+      displayName: this.localDisplayName
+    };
+  }
+
+  public setDisplayName(rawDisplayName: string): string {
+    const displayName = normalizeDisplayName(rawDisplayName);
+    this.store.setLocalDisplayName(displayName);
+    this.localDisplayName = displayName;
+    return displayName;
+  }
+
+  public listAgents(): KnownAgent[] {
+    const directory = this.store.listPeerDirectoryEntries();
+    const aggregated = aggregateDirectory(directory);
+
+    return [
+      {
+        nodeId: this.identity.nodeId,
+        publicKeyB64: this.identity.publicKeyB64,
+        displayName: this.localDisplayName,
+        self: true,
+        peerUrls: [],
+        lastSeenAt: null
+      },
+      ...aggregated
+        .filter((entry) => entry.nodeId !== this.identity.nodeId)
+        .map((entry) => ({
+          nodeId: entry.nodeId,
+          publicKeyB64: entry.publicKeyB64,
+          displayName: entry.displayName,
+          self: false,
+          peerUrls: entry.peerUrls,
+          lastSeenAt: entry.lastSeenAt
+        }))
+    ];
   }
 
   public createConversation(conversationId?: string): string {
@@ -91,10 +169,18 @@ export class MeshNode extends EventEmitter {
     return this.store.listPeers();
   }
 
-  public addPeer(rawUrl: string): string {
+  public async addPeer(rawUrl: string): Promise<{
+    url: string;
+    discovered?: PeerNodeInfo;
+  }> {
     const url = normalizePeerUrl(rawUrl);
     this.store.upsertPeer(url);
-    return url;
+    const discovered = await this.refreshPeerDirectory(url);
+
+    return {
+      url,
+      discovered: discovered ?? undefined
+    };
   }
 
   public listEvents(conversationId: string, after: number, limit: number): {
@@ -158,6 +244,53 @@ export class MeshNode extends EventEmitter {
     };
 
     return this.persistAndFanout(unsignedEvent);
+  }
+
+  public sendDirectMessage(input: DirectMessageInput): DirectMessageResult {
+    const recipientNodeId = input.recipientNodeId.trim();
+
+    if (!recipientNodeId) {
+      throw new Error("recipientNodeId is required");
+    }
+
+    if (recipientNodeId === this.identity.nodeId) {
+      throw new Error("recipientNodeId must not equal local node id");
+    }
+
+    const conversationId = directConversationId(
+      this.identity.nodeId,
+      recipientNodeId
+    );
+    const content = input.content.trim();
+
+    if (!content) {
+      throw new Error("content is required");
+    }
+
+    const unsignedEvent: UnsignedMeshEvent = {
+      conversationId,
+      senderId: this.identity.nodeId,
+      senderPubKey: this.identity.publicKeyB64,
+      clientMsgId: input.clientMsgId?.trim() || randomUUID(),
+      kind: "message",
+      lamport: this.store.nextLamport(conversationId),
+      wallTime: new Date().toISOString(),
+      payload: {
+        content
+      }
+    };
+
+    const routedPeerUrls = this.store.findPeerUrlsByNodeId(recipientNodeId);
+    const persistResult = this.persistAndFanout(
+      unsignedEvent,
+      routedPeerUrls.length > 0 ? routedPeerUrls : undefined
+    );
+
+    return {
+      ...persistResult,
+      conversationId,
+      routedPeerUrls
+    };
   }
 
   public sendAck(input: AckInput): { inserted: boolean; event: MeshEvent } {
@@ -251,6 +384,7 @@ export class MeshNode extends EventEmitter {
       }
 
       for (const peerUrl of peers) {
+        await this.refreshPeerDirectory(peerUrl);
         const remoteConversations = await this.fetchPeerConversations(peerUrl);
         for (const id of remoteConversations) {
           conversationIds.add(id);
@@ -261,6 +395,7 @@ export class MeshNode extends EventEmitter {
     let pulledEvents = 0;
 
     for (const peerUrl of peers) {
+      await this.refreshPeerDirectory(peerUrl);
       for (const conversationId of conversationIds) {
         pulledEvents += await this.pullConversationFromPeer(peerUrl, conversationId);
       }
@@ -274,7 +409,10 @@ export class MeshNode extends EventEmitter {
     };
   }
 
-  private persistAndFanout(unsignedEvent: UnsignedMeshEvent): {
+  private persistAndFanout(
+    unsignedEvent: UnsignedMeshEvent,
+    targetPeerUrls?: string[]
+  ): {
     inserted: boolean;
     event: MeshEvent;
   } {
@@ -295,7 +433,7 @@ export class MeshNode extends EventEmitter {
         this.emit("event", storedEvent);
       }
 
-      void this.fanoutEvent(event);
+      void this.fanoutEvent(event, targetPeerUrls);
     }
 
     return {
@@ -304,12 +442,18 @@ export class MeshNode extends EventEmitter {
     };
   }
 
-  private async fanoutEvent(event: MeshEvent): Promise<void> {
-    const peers = this.store.listPeers();
+  private async fanoutEvent(
+    event: MeshEvent,
+    targetPeerUrls?: string[]
+  ): Promise<void> {
+    const peerUrls =
+      targetPeerUrls && targetPeerUrls.length > 0
+        ? dedupeUrls(targetPeerUrls)
+        : this.store.listPeers().map((peer) => peer.url);
 
     await Promise.allSettled(
-      peers.map((peer) =>
-        this.postJson(`${peer.url}/p2p/events`, {
+      peerUrls.map((peerUrl) =>
+        this.postJson(`${peerUrl}/p2p/events`, {
           from: this.identity.nodeId,
           events: [event]
         })
@@ -334,6 +478,41 @@ export class MeshNode extends EventEmitter {
 
     const ingest = this.ingestPeerEvents(response.events);
     return ingest.accepted;
+  }
+
+  private async refreshPeerDirectory(
+    peerUrl: string
+  ): Promise<PeerNodeInfo | null> {
+    try {
+      const response = await this.fetchJson<PeerNodeInfo>(`${peerUrl}/p2p/node-info`);
+
+      if (
+        typeof response?.nodeId !== "string" ||
+        response.nodeId.length === 0 ||
+        typeof response.publicKeyB64 !== "string" ||
+        response.publicKeyB64.length === 0
+      ) {
+        return null;
+      }
+
+      if (response.nodeId === this.identity.nodeId) {
+        return response;
+      }
+
+      this.store.upsertPeerDirectoryEntry({
+        nodeId: response.nodeId,
+        sourceUrl: peerUrl,
+        publicKeyB64: response.publicKeyB64,
+        displayName:
+          typeof response.displayName === "string"
+            ? response.displayName
+            : null
+      });
+
+      return response;
+    } catch {
+      return null;
+    }
   }
 
   private async fetchPeerConversations(peerUrl: string): Promise<string[]> {
@@ -408,6 +587,79 @@ function normalizePeerUrl(rawUrl: string): string {
   }
 
   return url;
+}
+
+function normalizeDisplayName(rawDisplayName: string): string {
+  const displayName = rawDisplayName.trim();
+
+  if (!displayName) {
+    throw new Error("displayName is required");
+  }
+
+  if (displayName.length > 80) {
+    throw new Error("displayName must be at most 80 characters");
+  }
+
+  return displayName;
+}
+
+function directConversationId(nodeA: string, nodeB: string): string {
+  const pair = [nodeA, nodeB].sort((left, right) => left.localeCompare(right));
+  return `dm:${pair[0]}:${pair[1]}`;
+}
+
+function dedupeUrls(urls: string[]): string[] {
+  return [...new Set(urls)];
+}
+
+function aggregateDirectory(entries: PeerDirectoryEntry[]): Array<{
+  nodeId: string;
+  publicKeyB64: string;
+  displayName: string | null;
+  peerUrls: string[];
+  lastSeenAt: string;
+}> {
+  const grouped = new Map<
+    string,
+    {
+      nodeId: string;
+      publicKeyB64: string;
+      displayName: string | null;
+      peerUrls: string[];
+      lastSeenAt: string;
+    }
+  >();
+
+  for (const entry of entries) {
+    const existing = grouped.get(entry.nodeId);
+
+    if (!existing) {
+      grouped.set(entry.nodeId, {
+        nodeId: entry.nodeId,
+        publicKeyB64: entry.publicKeyB64,
+        displayName: entry.displayName,
+        peerUrls: [entry.sourceUrl],
+        lastSeenAt: entry.updatedAt
+      });
+      continue;
+    }
+
+    if (!existing.peerUrls.includes(entry.sourceUrl)) {
+      existing.peerUrls.push(entry.sourceUrl);
+    }
+
+    if (entry.updatedAt > existing.lastSeenAt) {
+      existing.lastSeenAt = entry.updatedAt;
+      existing.publicKeyB64 = entry.publicKeyB64;
+      existing.displayName = entry.displayName;
+    } else if (!existing.displayName && entry.displayName) {
+      existing.displayName = entry.displayName;
+    }
+  }
+
+  return [...grouped.values()].sort((left, right) =>
+    left.nodeId.localeCompare(right.nodeId)
+  );
 }
 
 function toMeshEvent(storedEvent: StoredMeshEvent): MeshEvent {

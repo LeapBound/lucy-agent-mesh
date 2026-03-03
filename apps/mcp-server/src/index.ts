@@ -38,6 +38,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "set_display_name",
+        description: "Set display name for this local mesh node.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["displayName"],
+          properties: {
+            displayName: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "list_agents",
+        description: "List known agents (self + discovered peers) for recipient selection.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {}
+        }
+      },
+      {
         name: "create_conversation",
         description: "Create or register a conversation on this local mesh node.",
         inputSchema: {
@@ -60,6 +81,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["conversationId", "content"],
           properties: {
             conversationId: { type: "string" },
+            content: { type: "string" },
+            clientMsgId: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "send_direct_message",
+        description:
+          "Send a direct message to one recipient node id (conversation id is derived automatically).",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["recipientNodeId", "content"],
+          properties: {
+            recipientNodeId: { type: "string" },
             content: { type: "string" },
             clientMsgId: { type: "string" }
           }
@@ -133,6 +169,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const result = await client.whoAmI();
         return asTextResult(result);
       }
+      case "set_display_name": {
+        const displayName = readRequiredString(args, "displayName");
+        const result = await client.setDisplayName(displayName);
+        return asTextResult(result);
+      }
+      case "list_agents": {
+        const result = await client.listAgents();
+        return asTextResult(result);
+      }
       case "create_conversation": {
         const conversationId = readOptionalString(args, "conversationId");
         const result = await client.createConversation(conversationId);
@@ -145,6 +190,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const result = await client.sendMessage({
           conversationId,
+          content,
+          clientMsgId
+        });
+
+        return asTextResult(result);
+      }
+      case "send_direct_message": {
+        const recipientNodeId = readRequiredString(args, "recipientNodeId");
+        const content = readRequiredString(args, "content");
+        const clientMsgId = readOptionalString(args, "clientMsgId");
+
+        const result = await client.sendDirectMessage({
+          recipientNodeId,
           content,
           clientMsgId
         });
