@@ -1,4 +1,7 @@
-import http from "node:http";
+import http, {
+  type IncomingHttpHeaders,
+  type ServerResponse
+} from "node:http";
 import { URL } from "node:url";
 
 import { WebSocket, WebSocketServer } from "ws";
@@ -6,7 +9,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { isMeshEvent, type Frontier, type MeshEvent } from "@lucy/core";
 
 import { loadNodeConfig } from "./config.js";
-import { readJsonBody, sendError, sendJson } from "./http.js";
+import { parseJsonBody, readJsonBody, readRawBody, sendError, sendJson } from "./http.js";
 import { MeshNode } from "./mesh-node.js";
 
 interface PeerEventsBody {
@@ -22,6 +25,28 @@ const server = http.createServer(async (request, response) => {
     const host = request.headers.host ?? `${config.host}:${config.port}`;
     const requestUrl = new URL(request.url ?? "/", `http://${host}`);
     const method = request.method ?? "GET";
+    const isP2PRoute = requestUrl.pathname.startsWith("/p2p/");
+    let p2pBodyText = "";
+
+    if (isP2PRoute) {
+      p2pBodyText = await readRawBody(request, config.maxBodyBytes);
+
+      const verification = meshNode.verifyIncomingP2PRequest({
+        method,
+        path: requestUrl.pathname,
+        bodyText: p2pBodyText,
+        headers: toSingleValueHeaders(request.headers)
+      });
+
+      if (!verification.ok) {
+        sendError(
+          response,
+          401,
+          `Unauthorized p2p request: ${verification.reason ?? "invalid auth"}`
+        );
+        return;
+      }
+    }
 
     if (method === "GET" && requestUrl.pathname === "/healthz") {
       sendJson(response, 200, { ok: true });
@@ -30,6 +55,61 @@ const server = http.createServer(async (request, response) => {
 
     if (method === "GET" && requestUrl.pathname === "/v1/node") {
       sendJson(response, 200, meshNode.getNodeInfo());
+      return;
+    }
+
+    if (method === "GET" && requestUrl.pathname === "/v1/network") {
+      sendJson(response, 200, { network: meshNode.getNetworkState() });
+      return;
+    }
+
+    if (method === "POST" && requestUrl.pathname === "/v1/network/init") {
+      const body = await readJsonBody<{
+        networkId?: string;
+        networkKey?: string;
+        bootstrapPeers?: string[];
+        joinTokenExpiresInSeconds?: number;
+      }>(request, config.maxBodyBytes);
+
+      const result = meshNode.initNetwork({
+        networkId: body.networkId,
+        networkKey: body.networkKey,
+        bootstrapPeers: body.bootstrapPeers,
+        joinTokenExpiresInSeconds: body.joinTokenExpiresInSeconds
+      });
+
+      sendJson(response, 200, result);
+      return;
+    }
+
+    if (method === "POST" && requestUrl.pathname === "/v1/network/token") {
+      const body = await readJsonBody<{
+        expiresInSeconds?: number;
+        bootstrapPeers?: string[];
+      }>(request, config.maxBodyBytes);
+
+      const result = meshNode.createJoinToken({
+        expiresInSeconds: body.expiresInSeconds,
+        bootstrapPeers: body.bootstrapPeers
+      });
+
+      sendJson(response, 200, result);
+      return;
+    }
+
+    if (method === "POST" && requestUrl.pathname === "/v1/network/join") {
+      const body = await readJsonBody<{ joinToken?: string }>(
+        request,
+        config.maxBodyBytes
+      );
+
+      if (!body.joinToken) {
+        sendError(response, 400, "joinToken is required");
+        return;
+      }
+
+      const result = meshNode.joinNetwork(body.joinToken);
+      sendJson(response, 200, result);
       return;
     }
 
@@ -213,7 +293,12 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (method === "POST" && requestUrl.pathname === "/p2p/events") {
-      const body = await readJsonBody<PeerEventsBody>(request, config.maxBodyBytes);
+      const body = parseRawJsonOrError<PeerEventsBody>(response, p2pBodyText);
+
+      if (!body) {
+        return;
+      }
+
       const events = (body.events ?? []).filter((event): event is MeshEvent =>
         isMeshEvent(event)
       );
@@ -233,11 +318,15 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (method === "POST" && requestUrl.pathname === "/p2p/sync") {
-      const body = await readJsonBody<{
+      const body = parseRawJsonOrError<{
         conversationId?: string;
         frontier?: Frontier;
         limit?: number;
-      }>(request, config.maxBodyBytes);
+      }>(response, p2pBodyText);
+
+      if (!body) {
+        return;
+      }
 
       if (!body.conversationId) {
         sendError(response, 400, "conversationId is required");
@@ -328,7 +417,14 @@ meshNode.on("event", (event) => {
 });
 
 const syncTimer = setInterval(() => {
-  void meshNode.syncFromPeers({});
+  void meshNode.syncFromPeers({}).catch((error: unknown) => {
+    const message =
+      error instanceof Error ? error.message : "Unexpected peer sync failure";
+
+    if (!message.includes("Network is not configured")) {
+      console.error("[node-daemon] peer sync failed", { error: message });
+    }
+  });
 }, config.syncIntervalMs);
 
 server.listen(config.port, config.host, () => {
@@ -357,9 +453,48 @@ process.on("SIGTERM", shutdown);
 
 function isClientInputError(message: string): boolean {
   return (
+    message.includes("Invalid JSON body") ||
+    message.includes("Invalid joinToken") ||
+    message.includes("joinToken has expired") ||
+    message.includes("Network is not configured") ||
     message.includes("required") ||
     message.includes("must ") ||
     message.includes("Unknown recipientNodeId") ||
     message.includes("exceeds max length")
   );
+}
+
+function parseRawJsonOrError<T>(
+  response: ServerResponse,
+  bodyText: string
+): T | undefined {
+  if (!bodyText) {
+    return {} as T;
+  }
+
+  try {
+    return parseJsonBody<T>(bodyText);
+  } catch {
+    sendError(response, 400, "Invalid JSON body");
+    return undefined;
+  }
+}
+
+function toSingleValueHeaders(
+  headers: IncomingHttpHeaders
+): Record<string, string | undefined> {
+  const normalized: Record<string, string | undefined> = {};
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (typeof value === "string") {
+      normalized[key.toLowerCase()] = value;
+      continue;
+    }
+
+    if (Array.isArray(value) && value.length > 0) {
+      normalized[key.toLowerCase()] = value[0];
+    }
+  }
+
+  return normalized;
 }

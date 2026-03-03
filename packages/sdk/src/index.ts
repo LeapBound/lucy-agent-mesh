@@ -43,6 +43,24 @@ export interface AgentContactProfile {
   updatedAt: string | null;
 }
 
+export interface NetworkState {
+  configured: boolean;
+  networkId: string | null;
+  hasNetworkKey: boolean;
+  keyFingerprint: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface JoinTokenPayload {
+  version: 1;
+  networkId: string;
+  networkKey: string;
+  bootstrapPeers: string[];
+  issuedAt: string;
+  expiresAt: string;
+}
+
 export class MeshNodeClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -61,8 +79,45 @@ export class MeshNodeClient {
     publicKeyB64: string;
     displayName: string | null;
     peers: Array<{ url: string; createdAt: string; lastSyncAt: string | null }>;
+    network: NetworkState;
   }> {
     return this.request("GET", "/v1/node");
+  }
+
+  public async getNetwork(): Promise<{
+    network: NetworkState;
+  }> {
+    return this.request("GET", "/v1/network");
+  }
+
+  public async initNetwork(input?: {
+    networkId?: string;
+    networkKey?: string;
+    bootstrapPeers?: string[];
+    joinTokenExpiresInSeconds?: number;
+  }): Promise<{
+    network: NetworkState;
+    joinToken: string;
+    joinTokenPayload: JoinTokenPayload;
+  }> {
+    return this.request("POST", "/v1/network/init", input ?? {});
+  }
+
+  public async createJoinToken(input?: {
+    expiresInSeconds?: number;
+    bootstrapPeers?: string[];
+  }): Promise<{
+    joinToken: string;
+    joinTokenPayload: JoinTokenPayload;
+  }> {
+    return this.request("POST", "/v1/network/token", input ?? {});
+  }
+
+  public async joinNetwork(joinToken: string): Promise<{
+    network: NetworkState;
+    bootstrapPeers: string[];
+  }> {
+    return this.request("POST", "/v1/network/join", { joinToken });
   }
 
   public async setDisplayName(displayName: string): Promise<{

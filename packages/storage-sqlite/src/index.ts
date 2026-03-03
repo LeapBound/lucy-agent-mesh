@@ -39,6 +39,13 @@ export interface AgentContactRecord {
   updatedAt: string;
 }
 
+export interface NetworkConfigRecord {
+  networkId: string;
+  networkKey: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface EventRow {
   local_seq: number;
   id: string;
@@ -142,6 +149,66 @@ export class SQLiteMeshStore {
         `
       )
       .run(displayName);
+  }
+
+  public getNetworkConfig(): NetworkConfigRecord | null {
+    const row = this.db
+      .prepare(
+        `
+        SELECT network_id, network_key, created_at, updated_at
+        FROM network_config
+        WHERE id = 1
+        LIMIT 1
+        `
+      )
+      .get() as
+      | {
+          network_id: string;
+          network_key: string;
+          created_at: string;
+          updated_at: string;
+        }
+      | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    return {
+      networkId: row.network_id,
+      networkKey: row.network_key,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  public setNetworkConfig(input: {
+    networkId: string;
+    networkKey: string;
+  }): NetworkConfigRecord {
+    const now = new Date().toISOString();
+    const existing = this.getNetworkConfig();
+    const createdAt = existing?.createdAt ?? now;
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO network_config (id, network_id, network_key, created_at, updated_at)
+        VALUES (1, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          network_id = excluded.network_id,
+          network_key = excluded.network_key,
+          updated_at = excluded.updated_at
+        `
+      )
+      .run(input.networkId, input.networkKey, createdAt, now);
+
+    return {
+      networkId: input.networkId,
+      networkKey: input.networkKey,
+      createdAt,
+      updatedAt: now
+    };
   }
 
   public createConversation(conversationId: string): void {
@@ -838,6 +905,14 @@ export class SQLiteMeshStore {
         role TEXT,
         capabilities TEXT,
         notes TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS network_config (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        network_id TEXT NOT NULL,
+        network_key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
     `);

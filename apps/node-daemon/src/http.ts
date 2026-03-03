@@ -5,6 +5,19 @@ export async function readJsonBody<T>(
   request: IncomingMessage,
   maxBytes: number
 ): Promise<T> {
+  const payload = await readRawBody(request, maxBytes);
+
+  if (!payload) {
+    return {} as T;
+  }
+
+  return parseJsonBody<T>(payload);
+}
+
+export async function readRawBody(
+  request: IncomingMessage,
+  maxBytes: number
+): Promise<string> {
   const chunks: Buffer[] = [];
   let totalSize = 0;
 
@@ -23,11 +36,18 @@ export async function readJsonBody<T>(
   }
 
   if (chunks.length === 0) {
-    return {} as T;
+    return "";
   }
 
-  const payload = Buffer.concat(chunks).toString("utf8");
-  return JSON.parse(payload) as T;
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+export function parseJsonBody<T>(payload: string): T {
+  try {
+    return JSON.parse(payload) as T;
+  } catch {
+    throw new Error("Invalid JSON body");
+  }
 }
 
 export function sendJson(

@@ -50,6 +50,61 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "get_network",
+        description: "Read local network configuration state.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {}
+        }
+      },
+      {
+        name: "init_network",
+        description:
+          "Initialize this node as a network bootstrap node and return a join token.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            networkId: { type: "string" },
+            networkKey: { type: "string" },
+            bootstrapPeers: {
+              type: "array",
+              items: { type: "string" }
+            },
+            joinTokenExpiresInSeconds: { type: "number" }
+          }
+        }
+      },
+      {
+        name: "create_join_token",
+        description:
+          "Create a new join token from current network config, optionally with bootstrap peers.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            expiresInSeconds: { type: "number" },
+            bootstrapPeers: {
+              type: "array",
+              items: { type: "string" }
+            }
+          }
+        }
+      },
+      {
+        name: "join_network",
+        description: "Join an existing mesh network with a join token.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["joinToken"],
+          properties: {
+            joinToken: { type: "string" }
+          }
+        }
+      },
+      {
         name: "list_agents",
         description: "List known agents (self + discovered peers) for recipient selection.",
         inputSchema: {
@@ -198,6 +253,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "set_display_name": {
         const displayName = readRequiredString(args, "displayName");
         const result = await client.setDisplayName(displayName);
+        return asTextResult(result);
+      }
+      case "get_network": {
+        const result = await client.getNetwork();
+        return asTextResult(result);
+      }
+      case "init_network": {
+        const networkId = readOptionalString(args, "networkId");
+        const networkKey = readOptionalString(args, "networkKey");
+        const bootstrapPeers = readOptionalStringArray(args, "bootstrapPeers");
+        const joinTokenExpiresInSeconds = readOptionalNumber(
+          args,
+          "joinTokenExpiresInSeconds"
+        );
+
+        const result = await client.initNetwork({
+          networkId,
+          networkKey,
+          bootstrapPeers,
+          joinTokenExpiresInSeconds
+        });
+
+        return asTextResult(result);
+      }
+      case "create_join_token": {
+        const expiresInSeconds = readOptionalNumber(args, "expiresInSeconds");
+        const bootstrapPeers = readOptionalStringArray(args, "bootstrapPeers");
+        const result = await client.createJoinToken({
+          expiresInSeconds,
+          bootstrapPeers
+        });
+        return asTextResult(result);
+      }
+      case "join_network": {
+        const joinToken = readRequiredString(args, "joinToken");
+        const result = await client.joinNetwork(joinToken);
         return asTextResult(result);
       }
       case "list_agents": {
@@ -378,4 +469,27 @@ function readOptionalNumber(
   }
 
   return value;
+}
+
+function readOptionalStringArray(
+  record: Record<string, unknown>,
+  key: string
+): string[] | undefined {
+  const value = record[key];
+
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error(`${key} must be an array of strings`);
+  }
+
+  return value.map((item, index) => {
+    if (typeof item !== "string") {
+      throw new Error(`${key}[${index}] must be a string`);
+    }
+
+    return item.trim();
+  });
 }

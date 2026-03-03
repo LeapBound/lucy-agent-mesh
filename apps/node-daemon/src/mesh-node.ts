@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 
 import {
@@ -13,6 +13,7 @@ import {
 } from "@lucy/core";
 import {
   type AgentContactRecord,
+  type NetworkConfigRecord,
   SQLiteMeshStore,
   type PeerDirectoryEntry,
   type KnownPeer,
@@ -20,6 +21,19 @@ import {
 } from "@lucy/storage-sqlite";
 
 import type { NodeConfig } from "./config.js";
+import {
+  assertJoinTokenNotExpired,
+  createJoinToken,
+  dedupePeers,
+  generateNetworkId,
+  generateNetworkKey,
+  normalizeNetworkId,
+  normalizeNetworkKey,
+  parseJoinToken,
+  signP2PRequest,
+  verifyP2PRequest,
+  type JoinTokenPayload
+} from "./network-auth.js";
 
 export interface MessageInput {
   conversationId: string;
@@ -85,6 +99,27 @@ export interface UpsertAgentContactInput {
   notes?: string | null;
 }
 
+export interface NetworkState {
+  configured: boolean;
+  networkId: string | null;
+  hasNetworkKey: boolean;
+  keyFingerprint: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface InitNetworkInput {
+  networkId?: string;
+  networkKey?: string;
+  bootstrapPeers?: string[];
+  joinTokenExpiresInSeconds?: number;
+}
+
+export interface JoinNetworkResult {
+  network: NetworkState;
+  bootstrapPeers: string[];
+}
+
 interface PeerNodeInfo {
   nodeId: string;
   publicKeyB64: string;
@@ -95,18 +130,30 @@ const MAX_SYNC_BATCH = 1000;
 
 export class MeshNode extends EventEmitter {
   private readonly store: SQLiteMeshStore;
+  private readonly p2pAuthSkewMs: number;
 
   public readonly identity;
   private localDisplayName: string | null;
+  private networkConfig: NetworkConfigRecord | null;
+  private readonly replayNonces = new Map<string, number>();
 
   public constructor(config: NodeConfig) {
     super();
     this.store = new SQLiteMeshStore(config.dbPath);
+    this.p2pAuthSkewMs = Math.max(config.p2pAuthSkewMs, 30000);
     this.identity = this.store.getOrCreateIdentity();
     this.localDisplayName = this.store.getLocalDisplayName();
+    this.networkConfig = this.store.getNetworkConfig();
 
     if (config.nodeName) {
       this.localDisplayName = this.setDisplayName(config.nodeName);
+    }
+
+    if (config.networkId && config.networkKey) {
+      this.networkConfig = this.store.setNetworkConfig({
+        networkId: normalizeNetworkId(config.networkId),
+        networkKey: normalizeNetworkKey(config.networkKey)
+      });
     }
 
     for (const peer of config.peers) {
@@ -123,12 +170,108 @@ export class MeshNode extends EventEmitter {
     publicKeyB64: string;
     displayName: string | null;
     peers: KnownPeer[];
+    network: NetworkState;
   } {
     return {
       nodeId: this.identity.nodeId,
       publicKeyB64: this.identity.publicKeyB64,
       displayName: this.localDisplayName,
-      peers: this.store.listPeers()
+      peers: this.store.listPeers(),
+      network: this.getNetworkState()
+    };
+  }
+
+  public getNetworkState(): NetworkState {
+    return toNetworkState(this.networkConfig);
+  }
+
+  public initNetwork(input: InitNetworkInput): {
+    network: NetworkState;
+    joinToken: string;
+    joinTokenPayload: JoinTokenPayload;
+  } {
+    const networkId = normalizeNetworkId(input.networkId ?? generateNetworkId());
+    const networkKey = normalizeNetworkKey(input.networkKey ?? generateNetworkKey());
+
+    this.networkConfig = this.store.setNetworkConfig({
+      networkId,
+      networkKey
+    });
+
+    const bootstrapPeers = dedupePeers([
+      ...this.store.listPeers().map((peer) => peer.url),
+      ...(input.bootstrapPeers ?? [])
+    ]);
+
+    for (const peer of bootstrapPeers) {
+      this.store.upsertPeer(peer);
+    }
+
+    const token = createJoinToken({
+      networkId,
+      networkKey,
+      bootstrapPeers,
+      expiresInSeconds: normalizeJoinTokenExpiresInSeconds(
+        input.joinTokenExpiresInSeconds
+      )
+    });
+
+    return {
+      network: this.getNetworkState(),
+      joinToken: token.token,
+      joinTokenPayload: token.payload
+    };
+  }
+
+  public createJoinToken(input?: {
+    expiresInSeconds?: number;
+    bootstrapPeers?: string[];
+  }): {
+    joinToken: string;
+    joinTokenPayload: JoinTokenPayload;
+  } {
+    if (!this.networkConfig) {
+      throw new Error(
+        "Network is not configured. Call /v1/network/init or /v1/network/join first."
+      );
+    }
+
+    const bootstrapPeers = dedupePeers([
+      ...this.store.listPeers().map((peer) => peer.url),
+      ...(input?.bootstrapPeers ?? [])
+    ]);
+
+    const token = createJoinToken({
+      networkId: this.networkConfig.networkId,
+      networkKey: this.networkConfig.networkKey,
+      bootstrapPeers,
+      expiresInSeconds: normalizeJoinTokenExpiresInSeconds(input?.expiresInSeconds)
+    });
+
+    return {
+      joinToken: token.token,
+      joinTokenPayload: token.payload
+    };
+  }
+
+  public joinNetwork(joinToken: string): JoinNetworkResult {
+    const payload = parseJoinToken(joinToken);
+    assertJoinTokenNotExpired(payload);
+
+    this.networkConfig = this.store.setNetworkConfig({
+      networkId: payload.networkId,
+      networkKey: payload.networkKey
+    });
+
+    const bootstrapPeers = dedupePeers(payload.bootstrapPeers);
+
+    for (const peer of bootstrapPeers) {
+      this.store.upsertPeer(peer);
+    }
+
+    return {
+      network: this.getNetworkState(),
+      bootstrapPeers
     };
   }
 
@@ -229,6 +372,57 @@ export class MeshNode extends EventEmitter {
     }
 
     return toContactProfile(updated);
+  }
+
+  public buildP2PAuthHeaders(input: {
+    method: string;
+    path: string;
+    bodyText: string;
+  }): Record<string, string> {
+    if (!this.networkConfig) {
+      throw new Error(
+        "Network is not configured. Call /v1/network/init or /v1/network/join first."
+      );
+    }
+
+    return signP2PRequest({
+      method: input.method,
+      path: input.path,
+      bodyText: input.bodyText,
+      networkId: this.networkConfig.networkId,
+      senderNodeId: this.identity.nodeId,
+      networkKey: this.networkConfig.networkKey
+    });
+  }
+
+  public verifyIncomingP2PRequest(input: {
+    method: string;
+    path: string;
+    bodyText: string;
+    headers: Record<string, string | undefined>;
+  }): {
+    ok: boolean;
+    reason?: string;
+    senderNodeId?: string;
+  } {
+    if (!this.networkConfig) {
+      return {
+        ok: false,
+        reason:
+          "Network is not configured on receiver. Call /v1/network/init or /v1/network/join."
+      };
+    }
+
+    return verifyP2PRequest({
+      method: input.method,
+      path: input.path,
+      bodyText: input.bodyText,
+      networkId: this.networkConfig.networkId,
+      networkKey: this.networkConfig.networkKey,
+      headers: input.headers,
+      maxSkewMs: this.p2pAuthSkewMs,
+      replayChecker: (key, ttlMs) => this.registerReplayNonce(key, ttlMs)
+    });
   }
 
   public createConversation(conversationId?: string): string {
@@ -446,6 +640,12 @@ export class MeshNode extends EventEmitter {
     conversationId?: string;
     peerUrl?: string;
   }): Promise<SyncSummary> {
+    if (!this.networkConfig) {
+      throw new Error(
+        "Network is not configured. Call /v1/network/init or /v1/network/join first."
+      );
+    }
+
     const peers = options.peerUrl
       ? [normalizePeerUrl(options.peerUrl)]
       : this.store.listPeers().map((peer) => peer.url);
@@ -617,14 +817,22 @@ export class MeshNode extends EventEmitter {
   private async postJson<TResponse>(url: string, body: unknown): Promise<TResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
+    const bodyText = JSON.stringify(body);
+    const requestUrl = new URL(url);
+    const authHeaders = this.maybeBuildP2PHeaders(
+      "POST",
+      requestUrl.pathname,
+      bodyText
+    );
 
     try {
       const response = await fetch(url, {
         method: "POST",
         headers: {
-          "content-type": "application/json"
+          "content-type": "application/json",
+          ...authHeaders
         },
-        body: JSON.stringify(body),
+        body: bodyText,
         signal: controller.signal
       });
 
@@ -641,12 +849,15 @@ export class MeshNode extends EventEmitter {
   private async fetchJson<TResponse>(url: string): Promise<TResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
+    const requestUrl = new URL(url);
+    const authHeaders = this.maybeBuildP2PHeaders("GET", requestUrl.pathname, "");
 
     try {
       const response = await fetch(url, {
         method: "GET",
         headers: {
-          "content-type": "application/json"
+          "content-type": "application/json",
+          ...authHeaders
         },
         signal: controller.signal
       });
@@ -658,6 +869,49 @@ export class MeshNode extends EventEmitter {
       return (await response.json()) as TResponse;
     } finally {
       clearTimeout(timeout);
+    }
+  }
+
+  private maybeBuildP2PHeaders(
+    method: string,
+    path: string,
+    bodyText: string
+  ): Record<string, string> {
+    if (!path.startsWith("/p2p/")) {
+      return {};
+    }
+
+    if (!this.networkConfig) {
+      throw new Error(
+        "Network is not configured. Call /v1/network/init or /v1/network/join first."
+      );
+    }
+
+    return this.buildP2PAuthHeaders({
+      method,
+      path,
+      bodyText
+    });
+  }
+
+  private registerReplayNonce(key: string, ttlMs: number): boolean {
+    const now = Date.now();
+
+    this.cleanupReplayNonceMap(now);
+
+    if (this.replayNonces.has(key)) {
+      return false;
+    }
+
+    this.replayNonces.set(key, now + Math.max(ttlMs, 1000));
+    return true;
+  }
+
+  private cleanupReplayNonceMap(nowMs: number): void {
+    for (const [key, expiresAt] of this.replayNonces.entries()) {
+      if (expiresAt <= nowMs) {
+        this.replayNonces.delete(key);
+      }
     }
   }
 }
@@ -732,6 +986,54 @@ function toContactMap(
   return new Map(
     contacts.map((contact) => [contact.nodeId, toContactProfile(contact)])
   );
+}
+
+function toNetworkState(networkConfig: NetworkConfigRecord | null): NetworkState {
+  if (!networkConfig) {
+    return {
+      configured: false,
+      networkId: null,
+      hasNetworkKey: false,
+      keyFingerprint: null,
+      createdAt: null,
+      updatedAt: null
+    };
+  }
+
+  return {
+    configured: true,
+    networkId: networkConfig.networkId,
+    hasNetworkKey: networkConfig.networkKey.length > 0,
+    keyFingerprint: hashFingerprint(networkConfig.networkKey),
+    createdAt: networkConfig.createdAt,
+    updatedAt: networkConfig.updatedAt
+  };
+}
+
+function hashFingerprint(networkKey: string): string {
+  return createHash("sha256").update(networkKey).digest("hex").slice(0, 12);
+}
+
+function normalizeJoinTokenExpiresInSeconds(input?: number): number {
+  if (input === undefined) {
+    return 7 * 24 * 60 * 60;
+  }
+
+  if (!Number.isFinite(input)) {
+    throw new Error("joinTokenExpiresInSeconds must be finite");
+  }
+
+  const rounded = Math.floor(input);
+
+  if (rounded < 60) {
+    throw new Error("joinTokenExpiresInSeconds must be at least 60 seconds");
+  }
+
+  if (rounded > 30 * 24 * 60 * 60) {
+    throw new Error("joinTokenExpiresInSeconds must be at most 30 days");
+  }
+
+  return rounded;
 }
 
 function aggregateDirectory(entries: PeerDirectoryEntry[]): Array<{

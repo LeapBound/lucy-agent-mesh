@@ -6,8 +6,11 @@ export interface NodeConfig {
   dataDir: string;
   dbPath: string;
   nodeName?: string;
+  networkId?: string;
+  networkKey?: string;
   peers: string[];
   syncIntervalMs: number;
+  p2pAuthSkewMs: number;
   maxBodyBytes: number;
 }
 
@@ -45,8 +48,11 @@ export function loadNodeConfig(): NodeConfig {
     dataDir,
     dbPath: path.join(dataDir, "mesh.sqlite"),
     nodeName: process.env.NODE_NAME?.trim() || undefined,
+    networkId: process.env.NETWORK_ID?.trim() || undefined,
+    networkKey: process.env.NETWORK_KEY?.trim() || undefined,
     peers: parsePeers(process.env.PEER_URLS),
     syncIntervalMs: parseNumber(process.env.SYNC_INTERVAL_MS, 15000),
+    p2pAuthSkewMs: parseNumber(process.env.P2P_AUTH_SKEW_MS, 300000),
     maxBodyBytes: parseNumber(process.env.MAX_BODY_BYTES, 512 * 1024)
   };
 }
