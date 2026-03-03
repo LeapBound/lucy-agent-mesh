@@ -30,6 +30,15 @@ export interface PeerDirectoryEntry {
   updatedAt: string;
 }
 
+export interface AgentContactRecord {
+  nodeId: string;
+  alias: string | null;
+  role: string | null;
+  capabilities: string | null;
+  notes: string | null;
+  updatedAt: string;
+}
+
 interface EventRow {
   local_seq: number;
   id: string;
@@ -597,6 +606,119 @@ export class SQLiteMeshStore {
     return [...unique];
   }
 
+  public upsertAgentContact(input: {
+    nodeId: string;
+    alias: string | null;
+    role: string | null;
+    capabilities: string | null;
+    notes: string | null;
+  }): void {
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO agent_contacts (
+          node_id,
+          alias,
+          role,
+          capabilities,
+          notes,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(node_id) DO UPDATE SET
+          alias = excluded.alias,
+          role = excluded.role,
+          capabilities = excluded.capabilities,
+          notes = excluded.notes,
+          updated_at = excluded.updated_at
+        `
+      )
+      .run(
+        input.nodeId,
+        input.alias,
+        input.role,
+        input.capabilities,
+        input.notes,
+        now
+      );
+  }
+
+  public listAgentContacts(): AgentContactRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT
+          node_id,
+          alias,
+          role,
+          capabilities,
+          notes,
+          updated_at
+        FROM agent_contacts
+        ORDER BY updated_at DESC
+        `
+      )
+      .all() as Array<{
+      node_id: string;
+      alias: string | null;
+      role: string | null;
+      capabilities: string | null;
+      notes: string | null;
+      updated_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      nodeId: row.node_id,
+      alias: row.alias,
+      role: row.role,
+      capabilities: row.capabilities,
+      notes: row.notes,
+      updatedAt: row.updated_at
+    }));
+  }
+
+  public getAgentContact(nodeId: string): AgentContactRecord | undefined {
+    const row = this.db
+      .prepare(
+        `
+        SELECT
+          node_id,
+          alias,
+          role,
+          capabilities,
+          notes,
+          updated_at
+        FROM agent_contacts
+        WHERE node_id = ?
+        LIMIT 1
+        `
+      )
+      .get(nodeId) as
+      | {
+          node_id: string;
+          alias: string | null;
+          role: string | null;
+          capabilities: string | null;
+          notes: string | null;
+          updated_at: string;
+        }
+      | undefined;
+
+    if (!row) {
+      return undefined;
+    }
+
+    return {
+      nodeId: row.node_id,
+      alias: row.alias,
+      role: row.role,
+      capabilities: row.capabilities,
+      notes: row.notes,
+      updatedAt: row.updated_at
+    };
+  }
+
   public isKnownSender(senderId: string, senderPubKey: string): boolean {
     return deriveNodeIdFromPublicKey(senderPubKey) === senderId;
   }
@@ -709,6 +831,15 @@ export class SQLiteMeshStore {
 
       CREATE INDEX IF NOT EXISTS idx_peer_directory_node
         ON peer_directory(node_id);
+
+      CREATE TABLE IF NOT EXISTS agent_contacts (
+        node_id TEXT PRIMARY KEY,
+        alias TEXT,
+        role TEXT,
+        capabilities TEXT,
+        notes TEXT,
+        updated_at TEXT NOT NULL
+      );
     `);
 
     this.ensureOptionalColumns();

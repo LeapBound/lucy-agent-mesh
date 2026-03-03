@@ -29,9 +29,18 @@ export interface KnownAgent {
   nodeId: string;
   publicKeyB64: string | null;
   displayName: string | null;
+  contact: AgentContactProfile | null;
   self: boolean;
   peerUrls: string[];
   lastSeenAt: string | null;
+}
+
+export interface AgentContactProfile {
+  alias: string | null;
+  role: string | null;
+  capabilities: string | null;
+  notes: string | null;
+  updatedAt: string | null;
 }
 
 export class MeshNodeClient {
@@ -64,6 +73,22 @@ export class MeshNodeClient {
 
   public async listAgents(): Promise<{ agents: KnownAgent[] }> {
     return this.request("GET", "/v1/agents");
+  }
+
+  public async listContacts(): Promise<{
+    contacts: Array<{ nodeId: string; profile: AgentContactProfile }>;
+  }> {
+    return this.request("GET", "/v1/contacts");
+  }
+
+  public async upsertContact(input: {
+    nodeId: string;
+    alias?: string | null;
+    role?: string | null;
+    capabilities?: string | null;
+    notes?: string | null;
+  }): Promise<{ nodeId: string; profile: AgentContactProfile }> {
+    return this.request("POST", "/v1/contacts", input);
   }
 
   public async createConversation(conversationId?: string): Promise<{

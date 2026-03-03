@@ -54,6 +54,40 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (method === "GET" && requestUrl.pathname === "/v1/contacts") {
+      sendJson(response, 200, { contacts: meshNode.listContacts() });
+      return;
+    }
+
+    if (method === "POST" && requestUrl.pathname === "/v1/contacts") {
+      const body = await readJsonBody<{
+        nodeId?: string;
+        alias?: string | null;
+        role?: string | null;
+        capabilities?: string | null;
+        notes?: string | null;
+      }>(request, config.maxBodyBytes);
+
+      if (!body.nodeId) {
+        sendError(response, 400, "nodeId is required");
+        return;
+      }
+
+      const profile = meshNode.upsertContact({
+        nodeId: body.nodeId,
+        alias: body.alias,
+        role: body.role,
+        capabilities: body.capabilities,
+        notes: body.notes
+      });
+
+      sendJson(response, 200, {
+        nodeId: body.nodeId,
+        profile
+      });
+      return;
+    }
+
     if (method === "POST" && requestUrl.pathname === "/v1/conversations") {
       const body = await readJsonBody<{ conversationId?: string }>(
         request,
@@ -253,6 +287,11 @@ const server = http.createServer(async (request, response) => {
     const errorMessage =
       error instanceof Error ? error.message : "Unexpected server error";
 
+    if (isClientInputError(errorMessage)) {
+      sendError(response, 400, errorMessage);
+      return;
+    }
+
     sendError(response, 500, errorMessage);
   }
 });
@@ -315,3 +354,12 @@ function shutdown(): void {
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+
+function isClientInputError(message: string): boolean {
+  return (
+    message.includes("required") ||
+    message.includes("must ") ||
+    message.includes("Unknown recipientNodeId") ||
+    message.includes("exceeds max length")
+  );
+}

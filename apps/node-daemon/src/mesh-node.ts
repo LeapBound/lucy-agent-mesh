@@ -12,6 +12,7 @@ import {
   type UnsignedMeshEvent
 } from "@lucy/core";
 import {
+  type AgentContactRecord,
   SQLiteMeshStore,
   type PeerDirectoryEntry,
   type KnownPeer,
@@ -49,9 +50,18 @@ export interface KnownAgent {
   nodeId: string;
   publicKeyB64: string | null;
   displayName: string | null;
+  contact: AgentContactProfile | null;
   self: boolean;
   peerUrls: string[];
   lastSeenAt: string | null;
+}
+
+export interface AgentContactProfile {
+  alias: string | null;
+  role: string | null;
+  capabilities: string | null;
+  notes: string | null;
+  updatedAt: string | null;
 }
 
 export interface DirectMessageInput {
@@ -65,6 +75,14 @@ export interface DirectMessageResult {
   event: MeshEvent;
   conversationId: string;
   routedPeerUrls: string[];
+}
+
+export interface UpsertAgentContactInput {
+  nodeId: string;
+  alias?: string | null;
+  role?: string | null;
+  capabilities?: string | null;
+  notes?: string | null;
 }
 
 interface PeerNodeInfo {
@@ -131,28 +149,86 @@ export class MeshNode extends EventEmitter {
 
   public listAgents(): KnownAgent[] {
     const directory = this.store.listPeerDirectoryEntries();
+    const contacts = toContactMap(this.store.listAgentContacts());
     const aggregated = aggregateDirectory(directory);
+
+    const remoteByNodeId = new Map(
+      aggregated.map((entry) => [entry.nodeId, entry] as const)
+    );
+
+    for (const [nodeId] of contacts) {
+      if (nodeId === this.identity.nodeId || remoteByNodeId.has(nodeId)) {
+        continue;
+      }
+
+      remoteByNodeId.set(nodeId, {
+        nodeId,
+        publicKeyB64: "",
+        displayName: null,
+        peerUrls: this.store.findPeerUrlsByNodeId(nodeId),
+        lastSeenAt: ""
+      });
+    }
 
     return [
       {
         nodeId: this.identity.nodeId,
         publicKeyB64: this.identity.publicKeyB64,
         displayName: this.localDisplayName,
+        contact: contacts.get(this.identity.nodeId) ?? null,
         self: true,
         peerUrls: [],
         lastSeenAt: null
       },
-      ...aggregated
+      ...[...remoteByNodeId.values()]
         .filter((entry) => entry.nodeId !== this.identity.nodeId)
+        .sort((left, right) => left.nodeId.localeCompare(right.nodeId))
         .map((entry) => ({
           nodeId: entry.nodeId,
-          publicKeyB64: entry.publicKeyB64,
+          publicKeyB64: entry.publicKeyB64 || null,
           displayName: entry.displayName,
+          contact: contacts.get(entry.nodeId) ?? null,
           self: false,
           peerUrls: entry.peerUrls,
-          lastSeenAt: entry.lastSeenAt
+          lastSeenAt: entry.lastSeenAt || null
         }))
     ];
+  }
+
+  public listContacts(): Array<{ nodeId: string; profile: AgentContactProfile }> {
+    return this.store.listAgentContacts().map((contact) => ({
+      nodeId: contact.nodeId,
+      profile: toContactProfile(contact)
+    }));
+  }
+
+  public upsertContact(input: UpsertAgentContactInput): AgentContactProfile {
+    const nodeId = input.nodeId.trim();
+
+    if (!nodeId) {
+      throw new Error("nodeId is required");
+    }
+
+    const alias = normalizeOptionalText(input.alias, 80);
+    const role = normalizeOptionalText(input.role, 120);
+    const capabilities = normalizeOptionalText(input.capabilities, 300);
+    const notes = normalizeOptionalText(input.notes, 1000);
+
+    this.store.upsertAgentContact({
+      nodeId,
+      alias,
+      role,
+      capabilities,
+      notes
+    });
+
+    const updated = this.store.getAgentContact(nodeId);
+
+    if (!updated) {
+      throw new Error("failed to persist contact");
+    }
+
+    return toContactProfile(updated);
   }
 
   public createConversation(conversationId?: string): string {
@@ -257,6 +333,14 @@ export class MeshNode extends EventEmitter {
       throw new Error("recipientNodeId must not equal local node id");
     }
 
+    const routedPeerUrls = this.store.findPeerUrlsByNodeId(recipientNodeId);
+
+    if (routedPeerUrls.length === 0) {
+      throw new Error(
+        "Unknown recipientNodeId. Run peer sync, check /v1/agents, or add peer contact first."
+      );
+    }
+
     const conversationId = directConversationId(
       this.identity.nodeId,
       recipientNodeId
@@ -280,10 +364,9 @@ export class MeshNode extends EventEmitter {
       }
     };
 
-    const routedPeerUrls = this.store.findPeerUrlsByNodeId(recipientNodeId);
     const persistResult = this.persistAndFanout(
       unsignedEvent,
-      routedPeerUrls.length > 0 ? routedPeerUrls : undefined
+      routedPeerUrls
     );
 
     return {
@@ -610,6 +693,45 @@ function directConversationId(nodeA: string, nodeB: string): string {
 
 function dedupeUrls(urls: string[]): string[] {
   return [...new Set(urls)];
+}
+
+function normalizeOptionalText(
+  value: string | null | undefined,
+  maxLength: number
+): string | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  const normalized = value.trim();
+
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized.length > maxLength) {
+    throw new Error(`field exceeds max length ${maxLength}`);
+  }
+
+  return normalized;
+}
+
+function toContactProfile(contact: AgentContactRecord): AgentContactProfile {
+  return {
+    alias: contact.alias,
+    role: contact.role,
+    capabilities: contact.capabilities,
+    notes: contact.notes,
+    updatedAt: contact.updatedAt
+  };
+}
+
+function toContactMap(
+  contacts: AgentContactRecord[]
+): Map<string, AgentContactProfile> {
+  return new Map(
+    contacts.map((contact) => [contact.nodeId, toContactProfile(contact)])
+  );
 }
 
 function aggregateDirectory(entries: PeerDirectoryEntry[]): Array<{

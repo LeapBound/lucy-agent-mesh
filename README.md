@@ -94,12 +94,22 @@ curl -s http://127.0.0.1:7010/v1/messages/direct \
   -d '{"recipientNodeId":"<target-node-id>","content":"hi direct"}' | jq
 ```
 
+7) 给该 agent 记一条通讯录备注（避免后续发错）：
+
+```bash
+curl -s http://127.0.0.1:7010/v1/contacts \
+  -H "content-type: application/json" \
+  -d '{"nodeId":"<target-node-id>","alias":"beta","role":"test-agent","capabilities":"sync,validation","notes":"负责测试与校验"}' | jq
+```
+
 ## 4. HTTP API（本地客户端）
 
 - `GET /healthz`
 - `GET /v1/node`
 - `POST /v1/node/profile`
 - `GET /v1/agents`
+- `GET /v1/contacts`
+- `POST /v1/contacts`
 - `POST /v1/conversations`
 - `POST /v1/messages`
 - `POST /v1/messages/direct`
@@ -128,10 +138,14 @@ curl -s http://127.0.0.1:7010/v1/messages/direct \
 NODE_API_URL=http://127.0.0.1:7010 pnpm dev:mcp
 ```
 
+> 当前 MCP 实现是 `stdio` transport（不是 HTTP server 形式）。
+
 MCP tools:
 - `whoami`
 - `set_display_name`
 - `list_agents`
+- `list_contacts`
+- `upsert_contact`
 - `create_conversation`
 - `send_message`
 - `send_direct_message`

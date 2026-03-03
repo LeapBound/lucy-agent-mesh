@@ -59,6 +59,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "list_contacts",
+        description: "List local agent contact notes (alias/role/capabilities).",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {}
+        }
+      },
+      {
+        name: "upsert_contact",
+        description:
+          "Create or update local contact metadata for an agent node id to reduce mis-sends.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["nodeId"],
+          properties: {
+            nodeId: { type: "string" },
+            alias: { type: "string" },
+            role: { type: "string" },
+            capabilities: { type: "string" },
+            notes: { type: "string" }
+          }
+        }
+      },
+      {
         name: "create_conversation",
         description: "Create or register a conversation on this local mesh node.",
         inputSchema: {
@@ -176,6 +202,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       case "list_agents": {
         const result = await client.listAgents();
+        return asTextResult(result);
+      }
+      case "list_contacts": {
+        const result = await client.listContacts();
+        return asTextResult(result);
+      }
+      case "upsert_contact": {
+        const nodeId = readRequiredString(args, "nodeId");
+        const alias = readOptionalString(args, "alias");
+        const role = readOptionalString(args, "role");
+        const capabilities = readOptionalString(args, "capabilities");
+        const notes = readOptionalString(args, "notes");
+
+        const result = await client.upsertContact({
+          nodeId,
+          alias,
+          role,
+          capabilities,
+          notes
+        });
+
         return asTextResult(result);
       }
       case "create_conversation": {
