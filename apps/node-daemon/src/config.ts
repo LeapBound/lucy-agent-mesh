@@ -13,6 +13,7 @@ export interface NodeConfig {
   peers: string[];
   syncIntervalMs: number;
   p2pAuthSkewMs: number;
+  autoAcceptIntroductions: boolean;
   maxBodyBytes: number;
 }
 
@@ -35,6 +36,24 @@ function parsePeers(input: string | undefined): string[] {
     .map((value) => value.trim())
     .filter((value) => value.length > 0)
     .map((value) => value.replace(/\/+$/, ""));
+}
+
+function parseBoolean(input: string | undefined, fallback: boolean): boolean {
+  if (!input) {
+    return fallback;
+  }
+
+  const normalized = input.trim().toLowerCase();
+
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+
+  return fallback;
 }
 
 export function loadNodeConfig(): NodeConfig {
@@ -60,6 +79,10 @@ export function loadNodeConfig(): NodeConfig {
     peers: parsePeers(process.env.PEER_URLS),
     syncIntervalMs: parseNumber(process.env.SYNC_INTERVAL_MS, 15000),
     p2pAuthSkewMs: parseNumber(process.env.P2P_AUTH_SKEW_MS, 300000),
+    autoAcceptIntroductions: parseBoolean(
+      process.env.DISCOVERY_AUTO_ACCEPT_INTROS,
+      true
+    ),
     maxBodyBytes: parseNumber(process.env.MAX_BODY_BYTES, 512 * 1024)
   };
 }

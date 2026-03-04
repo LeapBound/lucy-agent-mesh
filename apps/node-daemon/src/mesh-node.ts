@@ -134,6 +134,93 @@ export interface RedeemJoinTokenInput {
   requesterDisplayName?: string | null;
 }
 
+export interface DiscoveryQueryInput {
+  query: string;
+  maxHops?: number;
+  maxPeerFanout?: number;
+  limit?: number;
+  includeSelf?: boolean;
+}
+
+export interface DiscoveryRecommendation {
+  nodeId: string;
+  displayName: string | null;
+  publicKeyB64: string | null;
+  peerUrls: string[];
+  viaNodeId: string;
+  viaPeerUrl: string | null;
+  confidence: "direct" | "transitive";
+  hops: number;
+  score: number;
+  matchedOn: string[];
+  contact: AgentContactProfile | null;
+  lastSeenAt: string | null;
+}
+
+export interface DiscoverySearchResult {
+  queryId: string;
+  query: string;
+  recommendations: DiscoveryRecommendation[];
+  visitedNodeIds: string[];
+  maxHops: number;
+}
+
+export interface P2PDiscoveryQueryRequest {
+  queryId: string;
+  originNodeId: string;
+  query: string;
+  maxHops: number;
+  hops: number;
+  maxPeerFanout: number;
+  limit: number;
+  includeSelf: boolean;
+  excludeNodeIds: string[];
+}
+
+export interface P2PDiscoveryQueryResponse {
+  queryId: string;
+  responderNodeId: string;
+  visitedNodeIds: string[];
+  recommendations: DiscoveryRecommendation[];
+}
+
+export interface IntroductionRequestInput {
+  introducerPeerUrl: string;
+  targetNodeId: string;
+  message?: string;
+}
+
+export interface IntroductionResult {
+  status: "accepted" | "declined";
+  targetNodeId: string;
+  introducerNodeId: string;
+  reason?: string;
+  contact?: {
+    nodeId: string;
+    displayName: string | null;
+    publicKeyB64: string;
+    peerUrls: string[];
+    introducedByNodeId: string;
+  };
+}
+
+export interface P2PIntroductionRequest {
+  requesterNodeId: string;
+  requesterPublicKeyB64: string;
+  requesterDisplayName: string | null;
+  targetNodeId: string;
+  message?: string;
+}
+
+export interface P2PIntroductionOffer {
+  requesterNodeId: string;
+  requesterPublicKeyB64: string;
+  requesterDisplayName: string | null;
+  targetNodeId: string;
+  message?: string;
+  introducerNodeId: string;
+}
+
 interface PeerNodeInfo {
   nodeId: string;
   publicKeyB64: string;
@@ -146,6 +233,8 @@ export class MeshNode extends EventEmitter {
   private readonly store: SQLiteMeshStore;
   private readonly p2pAuthSkewMs: number;
   private readonly publicBaseUrl: string;
+  private readonly autoAcceptIntroductions: boolean;
+  private readonly seenDiscoveryQueries = new Map<string, number>();
 
   public readonly identity;
   private localDisplayName: string | null;
@@ -157,6 +246,7 @@ export class MeshNode extends EventEmitter {
     this.store = new SQLiteMeshStore(config.dbPath);
     this.p2pAuthSkewMs = Math.max(config.p2pAuthSkewMs, 30000);
     this.publicBaseUrl = normalizeIssuerUrl(config.publicBaseUrl);
+    this.autoAcceptIntroductions = config.autoAcceptIntroductions;
     this.identity = this.store.getOrCreateIdentity();
     this.localDisplayName = this.store.getLocalDisplayName();
     this.networkConfig = this.store.getNetworkConfig();
@@ -429,6 +519,369 @@ export class MeshNode extends EventEmitter {
       bootstrapPeers,
       inviteId: consumeResult.invite.inviteId,
       issuerNodeId: this.identity.nodeId
+    };
+  }
+
+  public async discoverAgents(
+    input: DiscoveryQueryInput
+  ): Promise<DiscoverySearchResult> {
+    if (!this.networkConfig) {
+      throw new Error(
+        "Network is not configured. Call /v1/network/init or /v1/network/join first."
+      );
+    }
+
+    const query = normalizeDiscoveryQueryText(input.query);
+    const maxHops = normalizeDiscoveryMaxHops(input.maxHops);
+    const maxPeerFanout = normalizeDiscoveryPeerFanout(input.maxPeerFanout);
+    const limit = normalizeDiscoveryLimit(input.limit);
+    const includeSelf = input.includeSelf ?? false;
+    const queryId = randomUUID();
+
+    this.registerDiscoveryQuery(queryId, 5 * 60 * 1000);
+
+    const localRecommendations = this.buildLocalDiscoveryRecommendations({
+      query,
+      includeSelf,
+      hops: 0,
+      confidence: "direct",
+      viaNodeId: this.identity.nodeId,
+      viaPeerUrl: null,
+      limit
+    });
+
+    const visitedNodeIds = new Set<string>([this.identity.nodeId]);
+    const remoteRecommendations: DiscoveryRecommendation[] = [];
+
+    if (maxHops > 0) {
+      const peers = this.store
+        .listPeers()
+        .map((peer) => peer.url)
+        .slice(0, maxPeerFanout);
+
+      const responses = await Promise.allSettled(
+        peers.map((peerUrl) =>
+          this.postJson<P2PDiscoveryQueryResponse>(`${peerUrl}/p2p/discovery/query`, {
+            queryId,
+            originNodeId: this.identity.nodeId,
+            query,
+            maxHops,
+            hops: 1,
+            maxPeerFanout,
+            limit,
+            includeSelf: false,
+            excludeNodeIds: [this.identity.nodeId]
+          } satisfies P2PDiscoveryQueryRequest)
+        )
+      );
+
+      for (const outcome of responses) {
+        if (outcome.status !== "fulfilled") {
+          continue;
+        }
+
+        for (const nodeId of outcome.value.visitedNodeIds) {
+          visitedNodeIds.add(nodeId);
+        }
+
+        remoteRecommendations.push(...outcome.value.recommendations);
+      }
+    }
+
+    return {
+      queryId,
+      query,
+      recommendations: mergeDiscoveryRecommendations(
+        [...localRecommendations, ...remoteRecommendations],
+        limit
+      ),
+      visitedNodeIds: [...visitedNodeIds].sort((left, right) =>
+        left.localeCompare(right)
+      ),
+      maxHops
+    };
+  }
+
+  public async handleP2PDiscoveryQuery(
+    request: P2PDiscoveryQueryRequest,
+    sourceSenderNodeId?: string
+  ): Promise<P2PDiscoveryQueryResponse> {
+    const queryId = request.queryId.trim();
+    const query = normalizeDiscoveryQueryText(request.query);
+    const maxHops = normalizeDiscoveryMaxHops(request.maxHops);
+    const hops = normalizeDiscoveryHop(request.hops, maxHops);
+    const maxPeerFanout = normalizeDiscoveryPeerFanout(request.maxPeerFanout);
+    const limit = normalizeDiscoveryLimit(request.limit);
+    const includeSelf = Boolean(request.includeSelf);
+    const originNodeId = request.originNodeId.trim();
+    const excludeNodeIds = Array.isArray(request.excludeNodeIds)
+      ? request.excludeNodeIds
+      : [];
+
+    if (!queryId) {
+      throw new Error("queryId is required");
+    }
+
+    if (!originNodeId) {
+      throw new Error("originNodeId is required");
+    }
+
+    if (!this.registerDiscoveryQuery(queryId, 5 * 60 * 1000)) {
+      return {
+        queryId,
+        responderNodeId: this.identity.nodeId,
+        visitedNodeIds: [this.identity.nodeId],
+        recommendations: []
+      };
+    }
+
+    const localRecommendations = this.buildLocalDiscoveryRecommendations({
+      query,
+      includeSelf,
+      hops,
+      confidence: hops === 0 ? "direct" : "transitive",
+      viaNodeId: this.identity.nodeId,
+      viaPeerUrl: null,
+      limit
+    });
+
+    const visitedNodeIds = new Set<string>([this.identity.nodeId]);
+    const remoteRecommendations: DiscoveryRecommendation[] = [];
+
+    if (hops < maxHops) {
+      const excludedNodeIds = new Set<string>([
+        ...excludeNodeIds,
+        originNodeId,
+        this.identity.nodeId
+      ]);
+      const excludedPeerUrls = new Set<string>();
+
+      if (sourceSenderNodeId) {
+        for (const sourceUrl of this.store.findPeerUrlsByNodeId(sourceSenderNodeId)) {
+          excludedPeerUrls.add(sourceUrl);
+        }
+      }
+
+      for (const nodeId of excludedNodeIds) {
+        for (const url of this.store.findPeerUrlsByNodeId(nodeId)) {
+          excludedPeerUrls.add(url);
+        }
+      }
+
+      const peers = this.store
+        .listPeers()
+        .map((peer) => peer.url)
+        .filter((peerUrl) => !excludedPeerUrls.has(peerUrl))
+        .slice(0, maxPeerFanout);
+
+      const nextExcludeNodeIds = [...excludedNodeIds];
+
+      const responses = await Promise.allSettled(
+        peers.map((peerUrl) =>
+          this.postJson<P2PDiscoveryQueryResponse>(`${peerUrl}/p2p/discovery/query`, {
+            queryId,
+            originNodeId,
+            query,
+            maxHops,
+            hops: hops + 1,
+            maxPeerFanout,
+            limit,
+            includeSelf,
+            excludeNodeIds: nextExcludeNodeIds
+          } satisfies P2PDiscoveryQueryRequest)
+        )
+      );
+
+      for (const outcome of responses) {
+        if (outcome.status !== "fulfilled") {
+          continue;
+        }
+
+        for (const nodeId of outcome.value.visitedNodeIds) {
+          visitedNodeIds.add(nodeId);
+        }
+
+        remoteRecommendations.push(...outcome.value.recommendations);
+      }
+    }
+
+    return {
+      queryId,
+      responderNodeId: this.identity.nodeId,
+      visitedNodeIds: [...visitedNodeIds].sort((left, right) =>
+        left.localeCompare(right)
+      ),
+      recommendations: mergeDiscoveryRecommendations(
+        [...localRecommendations, ...remoteRecommendations],
+        limit
+      )
+    };
+  }
+
+  public async requestIntroduction(
+    input: IntroductionRequestInput
+  ): Promise<IntroductionResult> {
+    if (!this.networkConfig) {
+      throw new Error(
+        "Network is not configured. Call /v1/network/init or /v1/network/join first."
+      );
+    }
+
+    const introducerPeerUrl = normalizePeerUrl(input.introducerPeerUrl);
+    const targetNodeId = input.targetNodeId.trim();
+    const message = normalizeOptionalText(input.message, 500);
+
+    if (!targetNodeId) {
+      throw new Error("targetNodeId is required");
+    }
+
+    if (targetNodeId === this.identity.nodeId) {
+      throw new Error("targetNodeId must not equal local node id");
+    }
+
+    const result = await this.postJson<IntroductionResult>(
+      `${introducerPeerUrl}/p2p/discovery/intro-request`,
+      {
+        requesterNodeId: this.identity.nodeId,
+        requesterPublicKeyB64: this.identity.publicKeyB64,
+        requesterDisplayName: this.localDisplayName,
+        targetNodeId,
+        message: message ?? undefined
+      } satisfies P2PIntroductionRequest
+    );
+
+    if (result.status === "accepted" && result.contact) {
+      for (const peerUrl of result.contact.peerUrls) {
+        this.store.upsertPeer(peerUrl);
+        this.store.upsertPeerDirectoryEntry({
+          nodeId: result.contact.nodeId,
+          sourceUrl: peerUrl,
+          publicKeyB64: result.contact.publicKeyB64,
+          displayName: result.contact.displayName
+        });
+      }
+    }
+
+    return result;
+  }
+
+  public async handleP2PIntroductionRequest(
+    request: P2PIntroductionRequest
+  ): Promise<IntroductionResult> {
+    const targetNodeId = request.targetNodeId.trim();
+    const requesterNodeId = request.requesterNodeId.trim();
+
+    if (!targetNodeId) {
+      throw new Error("targetNodeId is required");
+    }
+
+    if (!requesterNodeId) {
+      throw new Error("requesterNodeId is required");
+    }
+
+    if (!request.requesterPublicKeyB64 || request.requesterPublicKeyB64.trim().length === 0) {
+      throw new Error("requesterPublicKeyB64 is required");
+    }
+
+    const message = normalizeOptionalText(request.message, 500);
+
+    if (targetNodeId === this.identity.nodeId) {
+      return this.handleP2PIntroductionOffer({
+        requesterNodeId,
+        requesterPublicKeyB64: request.requesterPublicKeyB64.trim(),
+        requesterDisplayName:
+          normalizeOptionalText(request.requesterDisplayName ?? null, 120),
+        targetNodeId,
+        message: message ?? undefined,
+        introducerNodeId: this.identity.nodeId
+      });
+    }
+
+    const targetPeerUrls = this.store.findPeerUrlsByNodeId(targetNodeId);
+
+    if (targetPeerUrls.length === 0) {
+      return {
+        status: "declined",
+        targetNodeId,
+        introducerNodeId: this.identity.nodeId,
+        reason: "Introducer does not know how to reach target node"
+      };
+    }
+
+    for (const targetPeerUrl of targetPeerUrls) {
+      try {
+        const response = await this.postJson<IntroductionResult>(
+          `${targetPeerUrl}/p2p/discovery/intro-offer`,
+          {
+            requesterNodeId,
+            requesterPublicKeyB64: request.requesterPublicKeyB64.trim(),
+            requesterDisplayName:
+              normalizeOptionalText(request.requesterDisplayName ?? null, 120),
+            targetNodeId,
+            message: message ?? undefined,
+            introducerNodeId: this.identity.nodeId
+          } satisfies P2PIntroductionOffer
+        );
+
+        if (response.status === "accepted") {
+          return response;
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    return {
+      status: "declined",
+      targetNodeId,
+      introducerNodeId: this.identity.nodeId,
+      reason: "Target declined or could not be reached through introducer"
+    };
+  }
+
+  public handleP2PIntroductionOffer(
+    request: P2PIntroductionOffer
+  ): IntroductionResult {
+    const targetNodeId = request.targetNodeId.trim();
+
+    if (!targetNodeId) {
+      throw new Error("targetNodeId is required");
+    }
+
+    if (targetNodeId !== this.identity.nodeId) {
+      return {
+        status: "declined",
+        targetNodeId,
+        introducerNodeId: request.introducerNodeId.trim() || "unknown",
+        reason: "Target node mismatch"
+      };
+    }
+
+    if (!this.autoAcceptIntroductions) {
+      return {
+        status: "declined",
+        targetNodeId: this.identity.nodeId,
+        introducerNodeId: request.introducerNodeId.trim() || "unknown",
+        reason: "Target policy declined introduction"
+      };
+    }
+
+    const peerUrls = dedupePeers([
+      this.publicBaseUrl,
+      ...this.store.listPeers().map((peer) => peer.url)
+    ]).slice(0, 8);
+
+    return {
+      status: "accepted",
+      targetNodeId: this.identity.nodeId,
+      introducerNodeId: request.introducerNodeId.trim() || "unknown",
+      contact: {
+        nodeId: this.identity.nodeId,
+        displayName: this.localDisplayName,
+        publicKeyB64: this.identity.publicKeyB64,
+        peerUrls,
+        introducedByNodeId: request.introducerNodeId.trim() || "unknown"
+      }
     };
   }
 
@@ -971,6 +1424,49 @@ export class MeshNode extends EventEmitter {
     }
   }
 
+  private buildLocalDiscoveryRecommendations(input: {
+    query: string;
+    includeSelf: boolean;
+    hops: number;
+    confidence: "direct" | "transitive";
+    viaNodeId: string;
+    viaPeerUrl: string | null;
+    limit: number;
+  }): DiscoveryRecommendation[] {
+    const queryTokens = toDiscoveryQueryTokens(input.query);
+    const agents = this.listAgents();
+    const recommendations: DiscoveryRecommendation[] = [];
+
+    for (const agent of agents) {
+      if (!input.includeSelf && agent.self) {
+        continue;
+      }
+
+      const score = scoreAgentDiscovery(agent, queryTokens, input.query);
+
+      if (score.score <= 0) {
+        continue;
+      }
+
+      recommendations.push({
+        nodeId: agent.nodeId,
+        displayName: agent.displayName,
+        publicKeyB64: agent.publicKeyB64,
+        peerUrls: [...agent.peerUrls],
+        viaNodeId: input.viaNodeId,
+        viaPeerUrl: input.viaPeerUrl,
+        confidence: input.confidence,
+        hops: input.hops,
+        score: score.score,
+        matchedOn: score.matchedOn,
+        contact: agent.contact,
+        lastSeenAt: agent.lastSeenAt
+      });
+    }
+
+    return mergeDiscoveryRecommendations(recommendations, input.limit);
+  }
+
   private async postJson<TResponse>(url: string, body: unknown): Promise<TResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
@@ -1053,6 +1549,27 @@ export class MeshNode extends EventEmitter {
       path,
       bodyText
     });
+  }
+
+  private registerDiscoveryQuery(queryId: string, ttlMs: number): boolean {
+    const now = Date.now();
+
+    this.cleanupDiscoveryQueryMap(now);
+
+    if (this.seenDiscoveryQueries.has(queryId)) {
+      return false;
+    }
+
+    this.seenDiscoveryQueries.set(queryId, now + Math.max(ttlMs, 5_000));
+    return true;
+  }
+
+  private cleanupDiscoveryQueryMap(nowMs: number): void {
+    for (const [queryId, expiresAt] of this.seenDiscoveryQueries.entries()) {
+      if (expiresAt <= nowMs) {
+        this.seenDiscoveryQueries.delete(queryId);
+      }
+    }
   }
 
   private registerReplayNonce(key: string, ttlMs: number): boolean {
@@ -1203,6 +1720,214 @@ function normalizeJoinTokenMaxUsesInput(input?: number): number {
   }
 
   return normalizeJoinTokenMaxUses(input);
+}
+
+function normalizeDiscoveryQueryText(rawQuery: string): string {
+  const query = rawQuery.trim();
+
+  if (!query) {
+    throw new Error("query is required");
+  }
+
+  if (query.length > 200) {
+    throw new Error("query exceeds max length 200");
+  }
+
+  return query;
+}
+
+function normalizeDiscoveryMaxHops(input?: number): number {
+  if (input === undefined) {
+    return 2;
+  }
+
+  if (!Number.isFinite(input)) {
+    throw new Error("maxHops must be finite");
+  }
+
+  const rounded = Math.floor(input);
+
+  if (rounded < 0) {
+    throw new Error("maxHops must be at least 0");
+  }
+
+  if (rounded > 4) {
+    throw new Error("maxHops must be at most 4");
+  }
+
+  return rounded;
+}
+
+function normalizeDiscoveryHop(hops: number, maxHops: number): number {
+  if (!Number.isFinite(hops)) {
+    throw new Error("hops must be finite");
+  }
+
+  const rounded = Math.floor(hops);
+
+  if (rounded < 0) {
+    throw new Error("hops must be at least 0");
+  }
+
+  if (rounded > maxHops) {
+    throw new Error("hops must be less than or equal to maxHops");
+  }
+
+  return rounded;
+}
+
+function normalizeDiscoveryPeerFanout(input?: number): number {
+  if (input === undefined) {
+    return 3;
+  }
+
+  if (!Number.isFinite(input)) {
+    throw new Error("maxPeerFanout must be finite");
+  }
+
+  const rounded = Math.floor(input);
+
+  if (rounded < 1) {
+    throw new Error("maxPeerFanout must be at least 1");
+  }
+
+  if (rounded > 20) {
+    throw new Error("maxPeerFanout must be at most 20");
+  }
+
+  return rounded;
+}
+
+function normalizeDiscoveryLimit(input?: number): number {
+  if (input === undefined) {
+    return 20;
+  }
+
+  if (!Number.isFinite(input)) {
+    throw new Error("limit must be finite");
+  }
+
+  const rounded = Math.floor(input);
+
+  if (rounded < 1) {
+    throw new Error("limit must be at least 1");
+  }
+
+  if (rounded > 100) {
+    throw new Error("limit must be at most 100");
+  }
+
+  return rounded;
+}
+
+function toDiscoveryQueryTokens(query: string): string[] {
+  return [...new Set(query.toLowerCase().split(/[\s,;|/]+/).filter(Boolean))];
+}
+
+function scoreAgentDiscovery(
+  agent: KnownAgent,
+  queryTokens: string[],
+  rawQuery: string
+): {
+  score: number;
+  matchedOn: string[];
+} {
+  const queryLower = rawQuery.toLowerCase();
+  const fields: Array<{ key: string; value: string; weight: number }> = [
+    { key: "nodeId", value: agent.nodeId, weight: 5 },
+    { key: "displayName", value: agent.displayName ?? "", weight: 4 },
+    { key: "alias", value: agent.contact?.alias ?? "", weight: 4 },
+    { key: "role", value: agent.contact?.role ?? "", weight: 3 },
+    { key: "capabilities", value: agent.contact?.capabilities ?? "", weight: 3 },
+    { key: "notes", value: agent.contact?.notes ?? "", weight: 1 }
+  ];
+
+  let score = 0;
+  const matchedOn = new Set<string>();
+
+  for (const field of fields) {
+    const valueLower = field.value.toLowerCase();
+
+    if (!valueLower) {
+      continue;
+    }
+
+    if (valueLower === queryLower) {
+      score += field.weight + 2;
+      matchedOn.add(field.key);
+      continue;
+    }
+
+    if (valueLower.includes(queryLower)) {
+      score += field.weight;
+      matchedOn.add(field.key);
+    }
+  }
+
+  if (queryTokens.length > 0) {
+    let tokenHits = 0;
+
+    for (const token of queryTokens) {
+      if (
+        fields.some((field) => field.value.toLowerCase().includes(token))
+      ) {
+        tokenHits += 1;
+      }
+    }
+
+    if (tokenHits === 0) {
+      return { score: 0, matchedOn: [] };
+    }
+
+    score += tokenHits;
+  }
+
+  return {
+    score,
+    matchedOn: [...matchedOn].sort((left, right) => left.localeCompare(right))
+  };
+}
+
+function mergeDiscoveryRecommendations(
+  recommendations: DiscoveryRecommendation[],
+  limit: number
+): DiscoveryRecommendation[] {
+  const bestByNodeId = new Map<string, DiscoveryRecommendation>();
+
+  for (const recommendation of recommendations) {
+    const existing = bestByNodeId.get(recommendation.nodeId);
+
+    if (!existing) {
+      bestByNodeId.set(recommendation.nodeId, recommendation);
+      continue;
+    }
+
+    if (recommendation.score > existing.score) {
+      bestByNodeId.set(recommendation.nodeId, recommendation);
+      continue;
+    }
+
+    if (
+      recommendation.score === existing.score &&
+      recommendation.hops < existing.hops
+    ) {
+      bestByNodeId.set(recommendation.nodeId, recommendation);
+    }
+  }
+
+  return [...bestByNodeId.values()]
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+
+      if (left.hops !== right.hops) {
+        return left.hops - right.hops;
+      }
+
+      return left.nodeId.localeCompare(right.nodeId);
+    })
+    .slice(0, limit);
 }
 
 function aggregateDirectory(entries: PeerDirectoryEntry[]): Array<{

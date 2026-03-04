@@ -109,6 +109,38 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "discover_agents",
+        description:
+          "Search for agents through known peers (friend-of-friend discovery with hop limits).",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["query"],
+          properties: {
+            query: { type: "string" },
+            maxHops: { type: "number" },
+            maxPeerFanout: { type: "number" },
+            limit: { type: "number" },
+            includeSelf: { type: "boolean" }
+          }
+        }
+      },
+      {
+        name: "request_introduction",
+        description:
+          "Ask an introducer peer to connect you with a target node id (social introduction flow).",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["introducerPeerUrl", "targetNodeId"],
+          properties: {
+            introducerPeerUrl: { type: "string" },
+            targetNodeId: { type: "string" },
+            message: { type: "string" }
+          }
+        }
+      },
+      {
         name: "list_agents",
         description: "List known agents (self + discovered peers) for recipient selection.",
         inputSchema: {
@@ -303,6 +335,36 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const result = await client.joinNetwork(joinToken);
         return asTextResult(result);
       }
+      case "discover_agents": {
+        const query = readRequiredString(args, "query");
+        const maxHops = readOptionalNumber(args, "maxHops");
+        const maxPeerFanout = readOptionalNumber(args, "maxPeerFanout");
+        const limit = readOptionalNumber(args, "limit");
+        const includeSelf = readOptionalBoolean(args, "includeSelf");
+
+        const result = await client.discoverAgents({
+          query,
+          maxHops,
+          maxPeerFanout,
+          limit,
+          includeSelf
+        });
+
+        return asTextResult(result);
+      }
+      case "request_introduction": {
+        const introducerPeerUrl = readRequiredString(args, "introducerPeerUrl");
+        const targetNodeId = readRequiredString(args, "targetNodeId");
+        const message = readOptionalString(args, "message");
+
+        const result = await client.requestIntroduction({
+          introducerPeerUrl,
+          targetNodeId,
+          message
+        });
+
+        return asTextResult(result);
+      }
       case "list_agents": {
         const result = await client.listAgents();
         return asTextResult(result);
@@ -478,6 +540,23 @@ function readOptionalNumber(
 
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new Error(`${key} must be a finite number`);
+  }
+
+  return value;
+}
+
+function readOptionalBoolean(
+  record: Record<string, unknown>,
+  key: string
+): boolean | undefined {
+  const value = record[key];
+
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  if (typeof value !== "boolean") {
+    throw new Error(`${key} must be a boolean`);
   }
 
   return value;

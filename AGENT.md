@@ -95,3 +95,35 @@
   - `./node_modules/.bin/tsc -p packages/sdk/tsconfig.json --noEmit`
   - `./node_modules/.bin/tsc -p apps/node-daemon/tsconfig.json --noEmit`
   - `./node_modules/.bin/tsc -p apps/mcp-server/tsconfig.json --noEmit`
+
+### 2026-03-04（续）
+
+- 改动范围：`README.md`
+- 主要内容：
+  - 新增“系统怎么用（先看这里）”章节，给出 6 步使用路径。
+  - 明确职责边界：隧道/组网层由用户提供，`lucy-agent-mesh` 负责应用层 mesh 能力。
+  - 增加部署建议（本地开发/内网/跨公网）帮助用户快速选型。
+- 验证结果：README 结构与命令流程已人工复查。
+
+### 2026-03-04（社交发现）
+
+- 改动范围：`apps/node-daemon/src/mesh-node.ts`、`apps/node-daemon/src/index.ts`、`apps/node-daemon/src/config.ts`
+- 主要内容：
+  - 新增社交式发现链路：`/v1/discovery/query` + `/p2p/discovery/query`，支持 `maxHops/maxPeerFanout/limit` 受控扩散。
+  - 新增转介绍链路：`/v1/discovery/intro-request` + `/p2p/discovery/intro-request` + `/p2p/discovery/intro-offer`。
+  - 节点内增加 query 去重缓存（防环路）与推荐去重排序逻辑（按 score/hops）。
+  - 加入 `DISCOVERY_AUTO_ACCEPT_INTROS` 配置（默认 `true`）用于控制是否自动接受转介绍。
+
+### 2026-03-04（社交发现配套）
+
+- 改动范围：`packages/sdk/src/index.ts`、`apps/mcp-server/src/index.ts`、`README.md`
+- 主要内容：
+  - SDK 新增 `discoverAgents` 与 `requestIntroduction` 方法。
+  - MCP 新增 `discover_agents` 与 `request_introduction` 工具。
+  - README 增加“系统怎么用”与“社交式发现”章节，明确隧道层职责边界与调用示例。
+- 验证结果：
+  - `./node_modules/.bin/tsc -p packages/core/tsconfig.json --noEmit`
+  - `./node_modules/.bin/tsc -p packages/storage-sqlite/tsconfig.json --noEmit`
+  - `./node_modules/.bin/tsc -p packages/sdk/tsconfig.json --noEmit`
+  - `./node_modules/.bin/tsc -p apps/node-daemon/tsconfig.json --noEmit`
+  - `./node_modules/.bin/tsc -p apps/mcp-server/tsconfig.json --noEmit`

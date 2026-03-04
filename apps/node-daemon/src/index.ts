@@ -28,6 +28,7 @@ const server = http.createServer(async (request, response) => {
     const isP2PRoute = requestUrl.pathname.startsWith("/p2p/");
     const requiresP2PAuth =
       isP2PRoute && requestUrl.pathname !== "/p2p/network/redeem";
+    let verifiedP2PSenderNodeId: string | undefined;
     let p2pBodyText = "";
 
     if (requiresP2PAuth) {
@@ -48,6 +49,8 @@ const server = http.createServer(async (request, response) => {
         );
         return;
       }
+
+      verifiedP2PSenderNodeId = verification.senderNodeId;
     }
 
     if (method === "GET" && requestUrl.pathname === "/healthz") {
@@ -222,6 +225,54 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (method === "POST" && requestUrl.pathname === "/v1/discovery/query") {
+      const body = await readJsonBody<{
+        query?: string;
+        maxHops?: number;
+        maxPeerFanout?: number;
+        limit?: number;
+        includeSelf?: boolean;
+      }>(request, config.maxBodyBytes);
+
+      if (!body.query) {
+        sendError(response, 400, "query is required");
+        return;
+      }
+
+      const result = await meshNode.discoverAgents({
+        query: body.query,
+        maxHops: body.maxHops,
+        maxPeerFanout: body.maxPeerFanout,
+        limit: body.limit,
+        includeSelf: body.includeSelf
+      });
+
+      sendJson(response, 200, result);
+      return;
+    }
+
+    if (method === "POST" && requestUrl.pathname === "/v1/discovery/intro-request") {
+      const body = await readJsonBody<{
+        introducerPeerUrl?: string;
+        targetNodeId?: string;
+        message?: string;
+      }>(request, config.maxBodyBytes);
+
+      if (!body.introducerPeerUrl || !body.targetNodeId) {
+        sendError(response, 400, "introducerPeerUrl and targetNodeId are required");
+        return;
+      }
+
+      const result = await meshNode.requestIntroduction({
+        introducerPeerUrl: body.introducerPeerUrl,
+        targetNodeId: body.targetNodeId,
+        message: body.message
+      });
+
+      sendJson(response, 200, result);
+      return;
+    }
+
     if (method === "POST" && requestUrl.pathname === "/v1/messages") {
       const body = await readJsonBody<{
         conversationId?: string;
@@ -319,6 +370,131 @@ const server = http.createServer(async (request, response) => {
         requesterNodeId: body.requesterNodeId,
         requesterPublicKeyB64: body.requesterPublicKeyB64,
         requesterDisplayName: body.requesterDisplayName
+      });
+
+      sendJson(response, 200, result);
+      return;
+    }
+
+    if (method === "POST" && requestUrl.pathname === "/p2p/discovery/query") {
+      const body = parseRawJsonOrError<{
+        queryId?: string;
+        originNodeId?: string;
+        query?: string;
+        maxHops?: number;
+        hops?: number;
+        maxPeerFanout?: number;
+        limit?: number;
+        includeSelf?: boolean;
+        excludeNodeIds?: string[];
+      }>(response, p2pBodyText);
+
+      if (!body) {
+        return;
+      }
+
+      const queryId = typeof body.queryId === "string" ? body.queryId : "";
+      const originNodeId =
+        typeof body.originNodeId === "string" ? body.originNodeId : "";
+      const query = typeof body.query === "string" ? body.query : "";
+
+      if (!queryId || !originNodeId || !query) {
+        sendError(response, 400, "queryId, originNodeId and query are required");
+        return;
+      }
+
+      const result = await meshNode.handleP2PDiscoveryQuery(
+        {
+          queryId,
+          originNodeId,
+          query,
+          maxHops: Number(body.maxHops ?? 0),
+          hops: Number(body.hops ?? 0),
+          maxPeerFanout: Number(body.maxPeerFanout ?? 3),
+          limit: Number(body.limit ?? 20),
+          includeSelf: Boolean(body.includeSelf),
+          excludeNodeIds: Array.isArray(body.excludeNodeIds)
+            ? body.excludeNodeIds.filter(
+                (item): item is string => typeof item === "string"
+              )
+            : []
+        },
+        verifiedP2PSenderNodeId
+      );
+
+      sendJson(response, 200, result);
+      return;
+    }
+
+    if (method === "POST" && requestUrl.pathname === "/p2p/discovery/intro-request") {
+      const body = parseRawJsonOrError<{
+        requesterNodeId?: string;
+        requesterPublicKeyB64?: string;
+        requesterDisplayName?: string | null;
+        targetNodeId?: string;
+        message?: string;
+      }>(response, p2pBodyText);
+
+      if (!body) {
+        return;
+      }
+
+      if (!body.requesterNodeId || !body.requesterPublicKeyB64 || !body.targetNodeId) {
+        sendError(
+          response,
+          400,
+          "requesterNodeId, requesterPublicKeyB64 and targetNodeId are required"
+        );
+        return;
+      }
+
+      const result = await meshNode.handleP2PIntroductionRequest({
+        requesterNodeId: body.requesterNodeId,
+        requesterPublicKeyB64: body.requesterPublicKeyB64,
+        requesterDisplayName: body.requesterDisplayName ?? null,
+        targetNodeId: body.targetNodeId,
+        message: body.message
+      });
+
+      sendJson(response, 200, result);
+      return;
+    }
+
+    if (method === "POST" && requestUrl.pathname === "/p2p/discovery/intro-offer") {
+      const body = parseRawJsonOrError<{
+        requesterNodeId?: string;
+        requesterPublicKeyB64?: string;
+        requesterDisplayName?: string | null;
+        targetNodeId?: string;
+        message?: string;
+        introducerNodeId?: string;
+      }>(response, p2pBodyText);
+
+      if (!body) {
+        return;
+      }
+
+      if (
+        !body.requesterNodeId ||
+        !body.requesterPublicKeyB64 ||
+        !body.targetNodeId ||
+        !body.introducerNodeId
+      ) {
+        sendError(
+          response,
+          400,
+          "requesterNodeId, requesterPublicKeyB64, targetNodeId and introducerNodeId are required"
+        );
+        return;
+      }
+
+      const result = meshNode.handleP2PIntroductionOffer({
+        requesterNodeId: body.requesterNodeId,
+        requesterPublicKeyB64: body.requesterPublicKeyB64,
+        requesterDisplayName: body.requesterDisplayName ?? null,
+        targetNodeId: body.targetNodeId,
+        message: body.message,
+        introducerNodeId: body.introducerNodeId
       });
 
       sendJson(response, 200, result);

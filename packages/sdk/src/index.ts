@@ -76,6 +76,43 @@ export interface JoinTokenPayloadV2 {
 
 export type JoinTokenPayload = LegacyJoinTokenPayloadV1 | JoinTokenPayloadV2;
 
+export interface DiscoveryRecommendation {
+  nodeId: string;
+  displayName: string | null;
+  publicKeyB64: string | null;
+  peerUrls: string[];
+  viaNodeId: string;
+  viaPeerUrl: string | null;
+  confidence: "direct" | "transitive";
+  hops: number;
+  score: number;
+  matchedOn: string[];
+  contact: AgentContactProfile | null;
+  lastSeenAt: string | null;
+}
+
+export interface DiscoverySearchResult {
+  queryId: string;
+  query: string;
+  recommendations: DiscoveryRecommendation[];
+  visitedNodeIds: string[];
+  maxHops: number;
+}
+
+export interface IntroductionResult {
+  status: "accepted" | "declined";
+  targetNodeId: string;
+  introducerNodeId: string;
+  reason?: string;
+  contact?: {
+    nodeId: string;
+    displayName: string | null;
+    publicKeyB64: string;
+    peerUrls: string[];
+    introducedByNodeId: string;
+  };
+}
+
 export class MeshNodeClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -137,6 +174,24 @@ export class MeshNodeClient {
     bootstrapPeers: string[];
   }> {
     return this.request("POST", "/v1/network/join", { joinToken });
+  }
+
+  public async discoverAgents(input: {
+    query: string;
+    maxHops?: number;
+    maxPeerFanout?: number;
+    limit?: number;
+    includeSelf?: boolean;
+  }): Promise<DiscoverySearchResult> {
+    return this.request("POST", "/v1/discovery/query", input);
+  }
+
+  public async requestIntroduction(input: {
+    introducerPeerUrl: string;
+    targetNodeId: string;
+    message?: string;
+  }): Promise<IntroductionResult> {
+    return this.request("POST", "/v1/discovery/intro-request", input);
   }
 
   public async setDisplayName(displayName: string): Promise<{

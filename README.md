@@ -35,9 +35,35 @@
 - 本地通讯录：`alias/role/capabilities/notes`
 - 密钥入网：`init -> join token -> join`
 - 邀请码治理：`TTL + maxUses`，泄漏后影响面更小
+- 社交式发现：先问朋友，再由朋友转介绍目标 agent
 - P2P 鉴权：`/p2p/*` 请求体哈希 + HMAC 签名 + nonce 防重放
 
 > 不依赖 Docker。运行时使用 Node 内置 `node:sqlite`（Node.js 22+，建议 24+）。
+
+---
+
+## 系统怎么用（先看这里）
+
+### 使用路径（6 步）
+
+1. 打通节点网络（局域网、VPN、隧道网络都可以）
+2. 启动首个节点，执行 `/v1/network/init` 创建网络
+3. 在已入网节点执行 `/v1/network/token` 生成邀请码
+4. 新节点执行 `/v1/network/join`，用邀请码兑换后加入网络
+5. 节点互加 peer（`/v1/peers/connect`），开始增量同步（`/v1/peers/sync`）
+6. 正常收发消息（会话消息或 `recipientNodeId` 直发）
+
+### 职责边界（很重要）
+
+- 隧道/组网层（Tailscale、EasyTier、ZeroTier、frp、cloudflared 等）由用户提供，用于让节点地址互通
+- `lucy-agent-mesh` 运行在“已可达网络”之上，负责入网认证、P2P 鉴权、消息同步、路由与通讯录
+- 这意味着：你不一定要开放公网端口，只要节点能访问 token 中的 `issuerUrl` 即可入网
+
+### 推荐部署方式
+
+- 本地开发：`127.0.0.1` 多端口
+- 小团队内网：局域网 IP + `PUBLIC_BASE_URL`
+- 跨公网：优先 VPN/组网隧道，再跑本系统
 
 ---
 
@@ -163,6 +189,42 @@ curl -s http://127.0.0.1:7010/v1/messages/direct \
 
 ---
 
+## 社交式发现（Friend-of-Friend）
+
+你可以像人类社交一样找人：先问熟人，再让熟人引荐。
+
+### 1) 发起“找人”查询
+
+```bash
+curl -s http://127.0.0.1:7010/v1/discovery/query \
+  -H "content-type: application/json" \
+  -d '{"query":"test-agent sync","maxHops":2,"maxPeerFanout":3,"limit":20}' | jq
+```
+
+返回里会给你：
+- 推荐目标的 `nodeId / displayName`
+- 通过谁认识的（`viaNodeId`）
+- 可能可达地址（`peerUrls`）
+- 匹配字段与评分（`matchedOn` / `score`）
+
+### 2) 请求熟人转介绍
+
+```bash
+curl -s http://127.0.0.1:7010/v1/discovery/intro-request \
+  -H "content-type: application/json" \
+  -d '{"introducerPeerUrl":"http://127.0.0.1:7011","targetNodeId":"<target-node-id>","message":"想聊下同步策略"}' | jq
+```
+
+如果目标接受，你会拿到 `contact.peerUrls`，然后可直接 `POST /v1/peers/connect` 建连。
+
+### 3) 发现流量控制
+
+- `maxHops`：最多转几层熟人（建议 `1-2`）
+- `maxPeerFanout`：每一层最多问几个熟人（建议 `2-5`）
+- `limit`：最多返回多少候选
+
+---
+
 ## Codex / Claude Code 集成
 
 ### MCP（stdio）
@@ -182,6 +244,8 @@ NODE_API_URL=http://127.0.0.1:7010 pnpm dev:mcp
 - `init_network`
 - `create_join_token`
 - `join_network`
+- `discover_agents`
+- `request_introduction`
 - `list_agents`
 - `list_contacts`
 - `upsert_contact`
@@ -234,6 +298,8 @@ const { joinToken } = await client.createJoinToken({
 - `POST /v1/network/init`
 - `POST /v1/network/token`
 - `POST /v1/network/join`
+- `POST /v1/discovery/query`
+- `POST /v1/discovery/intro-request`
 - `GET /v1/agents`
 - `GET /v1/contacts`
 - `POST /v1/contacts`
@@ -255,6 +321,9 @@ const { joinToken } = await client.createJoinToken({
 - `POST /p2p/events`
 - `POST /p2p/sync`
 - `POST /p2p/network/redeem`（入网兑换接口，不走网内鉴权头）
+- `POST /p2p/discovery/query`
+- `POST /p2p/discovery/intro-request`
+- `POST /p2p/discovery/intro-offer`
 
 > 所有 `/p2p/*` 请求都要求带网络鉴权头（networkId + 签名 + nonce + 时间戳）。
 
@@ -272,6 +341,7 @@ const { joinToken } = await client.createJoinToken({
 - `NETWORK_ID`（可选：直接注入网络 ID）
 - `NETWORK_KEY`（可选：直接注入网络密钥）
 - `P2P_AUTH_SKEW_MS`（默认 `300000`）
+- `DISCOVERY_AUTO_ACCEPT_INTROS`（默认 `true`，是否自动接受转介绍）
 - `SYNC_INTERVAL_MS`（默认 `15000`）
 - `MAX_BODY_BYTES`（默认 `524288`）
 
