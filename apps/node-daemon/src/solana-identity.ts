@@ -67,6 +67,10 @@ export function normalizeAnchorTxSignature(raw?: string): string | null {
     throw new Error("anchorTxSignature must be between 32 and 128 chars");
   }
 
+  if (!/^[1-9A-HJ-NP-Za-km-z]+$/.test(value)) {
+    throw new Error("anchorTxSignature must be base58");
+  }
+
   return value;
 }
 

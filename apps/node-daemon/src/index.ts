@@ -169,7 +169,7 @@ const server = http.createServer(async (request, response) => {
         return;
       }
 
-      const binding = meshNode.bindSolanaIdentity({
+      const binding = await meshNode.bindSolanaIdentity({
         challengeId: body.challengeId,
         signatureBase64: body.signatureBase64,
         anchorTxSignature: body.anchorTxSignature
@@ -736,6 +736,8 @@ function isClientInputError(message: string): boolean {
     message.includes("Network is not configured") ||
     message.includes("identity challenge") ||
     message.includes("identity signature") ||
+    message.includes("anchor transaction") ||
+    message.includes("anchorTxSignature") ||
     message.includes("walletAddress") ||
     message.includes("signatureBase64") ||
     message.includes("chain") ||

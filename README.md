@@ -199,9 +199,9 @@ curl -s http://127.0.0.1:7010/v1/messages/direct \
 
 ---
 
-## 链上身份绑定（Phase 1: Solana）
+## 链上身份绑定（Phase 2: Solana Anchor 校验）
 
-本阶段目标：把 `nodeId` 绑定到一个 Solana 钱包地址，形成可验证唯一身份（非 KYC）。
+本阶段目标：把 `nodeId` 绑定到一个 Solana 钱包地址，并可选校验一笔链上交易签名（非 KYC）。
 
 1. 创建挑战：
 
@@ -219,6 +219,10 @@ curl -s http://127.0.0.1:7010/v1/identity/bind \
   -d '{"challengeId":"<challenge-id>","signatureBase64":"<signature-base64>","anchorTxSignature":"<optional-solana-tx>"}' | jq
 ```
 
+> `anchorTxSignature` 提供后，节点会实时调用 Solana RPC：
+> 1) 校验该交易在 `cluster` 上存在且成功  
+> 2) 校验交易 signer 中包含 `walletAddress`
+
 3. 查询绑定状态：
 
 ```bash
@@ -233,7 +237,8 @@ curl -s http://127.0.0.1:7010/v1/identity/revoke \
   -d '{"chain":"solana"}' | jq
 ```
 
-> 说明：通信正文默认仍在链下 mesh 中传输；链上身份用于身份可验证与后续权限/结算扩展。
+> 说明：通信正文默认仍在链下 mesh 中传输；链上身份用于身份可验证与后续权限/结算扩展。  
+> 如需强制每次绑定都带链上锚点，可设置 `IDENTITY_REQUIRE_ANCHOR_TX=true`。
 
 ---
 
@@ -447,6 +452,12 @@ const { joinToken } = await client.createJoinToken({
 - `NETWORK_KEY`（可选：直接注入网络密钥）
 - `P2P_AUTH_SKEW_MS`（默认 `300000`）
 - `DISCOVERY_AUTO_ACCEPT_INTROS`（默认 `true`，是否自动接受转介绍）
+- `IDENTITY_REQUIRE_ANCHOR_TX`（默认 `false`，是否强制绑定时必须提供并校验 `anchorTxSignature`）
+- `SOLANA_RPC_URL`（可选，非标准 cluster 的默认 RPC 地址）
+- `SOLANA_RPC_DEVNET_URL`（默认 `https://api.devnet.solana.com`）
+- `SOLANA_RPC_TESTNET_URL`（默认 `https://api.testnet.solana.com`）
+- `SOLANA_RPC_MAINNET_URL`（默认 `https://api.mainnet-beta.solana.com`）
+- `SOLANA_RPC_TIMEOUT_MS`（默认 `5000`）
 - `SYNC_INTERVAL_MS`（默认 `15000`）
 - `MAX_BODY_BYTES`（默认 `524288`）
 

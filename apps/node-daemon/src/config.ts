@@ -14,6 +14,12 @@ export interface NodeConfig {
   syncIntervalMs: number;
   p2pAuthSkewMs: number;
   autoAcceptIntroductions: boolean;
+  identityRequireAnchorTx: boolean;
+  solanaRpcUrl?: string;
+  solanaRpcDevnetUrl: string;
+  solanaRpcTestnetUrl: string;
+  solanaRpcMainnetUrl: string;
+  solanaRpcTimeoutMs: number;
   maxBodyBytes: number;
 }
 
@@ -83,6 +89,27 @@ export function loadNodeConfig(): NodeConfig {
       process.env.DISCOVERY_AUTO_ACCEPT_INTROS,
       true
     ),
+    identityRequireAnchorTx: parseBoolean(
+      process.env.IDENTITY_REQUIRE_ANCHOR_TX,
+      false
+    ),
+    solanaRpcUrl: normalizeOptionalHttpUrl(process.env.SOLANA_RPC_URL),
+    solanaRpcDevnetUrl: normalizeHttpUrlWithDefault(
+      process.env.SOLANA_RPC_DEVNET_URL,
+      "https://api.devnet.solana.com",
+      "SOLANA_RPC_DEVNET_URL"
+    ),
+    solanaRpcTestnetUrl: normalizeHttpUrlWithDefault(
+      process.env.SOLANA_RPC_TESTNET_URL,
+      "https://api.testnet.solana.com",
+      "SOLANA_RPC_TESTNET_URL"
+    ),
+    solanaRpcMainnetUrl: normalizeHttpUrlWithDefault(
+      process.env.SOLANA_RPC_MAINNET_URL,
+      "https://api.mainnet-beta.solana.com",
+      "SOLANA_RPC_MAINNET_URL"
+    ),
+    solanaRpcTimeoutMs: parseNumber(process.env.SOLANA_RPC_TIMEOUT_MS, 5000),
     maxBodyBytes: parseNumber(process.env.MAX_BODY_BYTES, 512 * 1024)
   };
 }
@@ -104,6 +131,40 @@ function normalizePublicBaseUrl(
 
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error("PUBLIC_BASE_URL must use http or https");
+  }
+
+  return parsed.toString().replace(/\/+$/, "");
+}
+
+function normalizeHttpUrlWithDefault(
+  value: string | undefined,
+  fallback: string,
+  envName: string
+): string {
+  return normalizeHttpUrl(value?.trim() || fallback, envName);
+}
+
+function normalizeOptionalHttpUrl(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+
+  if (!normalized) {
+    return undefined;
+  }
+
+  return normalizeHttpUrl(normalized, "SOLANA_RPC_URL");
+}
+
+function normalizeHttpUrl(value: string, envName: string): string {
+  let parsed: URL;
+
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${envName} must be a valid URL`);
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`${envName} must use http or https`);
   }
 
   return parsed.toString().replace(/\/+$/, "");

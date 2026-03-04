@@ -50,6 +50,10 @@ import {
   normalizeSolanaWalletAddress,
   verifySolanaIdentitySignature
 } from "./solana-identity.js";
+import {
+  verifySolanaAnchorTransaction,
+  type SolanaRpcConfig
+} from "./solana-rpc.js";
 
 export interface MessageInput {
   conversationId: string;
@@ -269,6 +273,8 @@ export class MeshNode extends EventEmitter {
   private readonly p2pAuthSkewMs: number;
   private readonly publicBaseUrl: string;
   private readonly autoAcceptIntroductions: boolean;
+  private readonly identityRequireAnchorTx: boolean;
+  private readonly solanaRpcConfig: SolanaRpcConfig;
   private readonly seenDiscoveryQueries = new Map<string, number>();
 
   public readonly identity;
@@ -282,6 +288,14 @@ export class MeshNode extends EventEmitter {
     this.p2pAuthSkewMs = Math.max(config.p2pAuthSkewMs, 30000);
     this.publicBaseUrl = normalizeIssuerUrl(config.publicBaseUrl);
     this.autoAcceptIntroductions = config.autoAcceptIntroductions;
+    this.identityRequireAnchorTx = config.identityRequireAnchorTx;
+    this.solanaRpcConfig = {
+      defaultRpcUrl: config.solanaRpcUrl,
+      devnetRpcUrl: config.solanaRpcDevnetUrl,
+      testnetRpcUrl: config.solanaRpcTestnetUrl,
+      mainnetRpcUrl: config.solanaRpcMainnetUrl,
+      timeoutMs: config.solanaRpcTimeoutMs
+    };
     this.identity = this.store.getOrCreateIdentity();
     this.localDisplayName = this.store.getLocalDisplayName();
     this.networkConfig = this.store.getNetworkConfig();
@@ -1067,11 +1081,11 @@ export class MeshNode extends EventEmitter {
     return toSolanaIdentityChallenge(challenge);
   }
 
-  public bindSolanaIdentity(input: {
+  public async bindSolanaIdentity(input: {
     challengeId: string;
     signatureBase64: string;
     anchorTxSignature?: string | null;
-  }): IdentityBindingView {
+  }): Promise<IdentityBindingView> {
     const challengeId = input.challengeId.trim();
 
     if (!challengeId) {
@@ -1093,6 +1107,16 @@ export class MeshNode extends EventEmitter {
       throw new Error("identity challenge node mismatch");
     }
 
+    const anchorTxSignature = normalizeAnchorTxSignature(
+      input.anchorTxSignature ?? undefined
+    );
+
+    if (!anchorTxSignature && this.identityRequireAnchorTx) {
+      throw new Error(
+        "anchorTxSignature is required when IDENTITY_REQUIRE_ANCHOR_TX=true"
+      );
+    }
+
     const verified = verifySolanaIdentitySignature({
       walletAddress: challenge.walletAddress,
       statement: challenge.statement,
@@ -1101,6 +1125,15 @@ export class MeshNode extends EventEmitter {
 
     if (!verified) {
       throw new Error("identity signature verification failed");
+    }
+
+    if (anchorTxSignature) {
+      await verifySolanaAnchorTransaction({
+        cluster: challenge.cluster,
+        walletAddress: challenge.walletAddress,
+        anchorTxSignature,
+        rpc: this.solanaRpcConfig
+      });
     }
 
     const consumed = this.store.consumeIdentityChallenge({
@@ -1121,7 +1154,7 @@ export class MeshNode extends EventEmitter {
       cluster: challenge.cluster,
       challengeId: challenge.challengeId,
       proofSignatureB64: signatureBase64,
-      anchorTxSignature: normalizeAnchorTxSignature(input.anchorTxSignature ?? undefined),
+      anchorTxSignature,
       identityCommitment: computeIdentityCommitment({
         nodeId: this.identity.nodeId,
         chain: "solana",

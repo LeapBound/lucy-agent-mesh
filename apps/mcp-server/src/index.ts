@@ -284,7 +284,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "bind_identity",
         description:
-          "Verify a Solana signature over challenge statement and persist identity binding.",
+          "Verify a Solana signature over challenge statement, optionally verify anchorTxSignature on Solana RPC, and persist identity binding.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
