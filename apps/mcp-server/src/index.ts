@@ -72,7 +72,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "array",
               items: { type: "string" }
             },
-            joinTokenExpiresInSeconds: { type: "number" }
+            joinTokenExpiresInSeconds: { type: "number" },
+            joinTokenMaxUses: { type: "number" },
+            joinTokenIssuerUrl: { type: "string" }
           }
         }
       },
@@ -85,6 +87,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           additionalProperties: false,
           properties: {
             expiresInSeconds: { type: "number" },
+            maxUses: { type: "number" },
+            issuerUrl: { type: "string" },
             bootstrapPeers: {
               type: "array",
               items: { type: "string" }
@@ -267,21 +271,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           args,
           "joinTokenExpiresInSeconds"
         );
+        const joinTokenMaxUses = readOptionalNumber(args, "joinTokenMaxUses");
+        const joinTokenIssuerUrl = readOptionalString(args, "joinTokenIssuerUrl");
 
         const result = await client.initNetwork({
           networkId,
           networkKey,
           bootstrapPeers,
-          joinTokenExpiresInSeconds
+          joinTokenExpiresInSeconds,
+          joinTokenMaxUses,
+          joinTokenIssuerUrl
         });
 
         return asTextResult(result);
       }
       case "create_join_token": {
         const expiresInSeconds = readOptionalNumber(args, "expiresInSeconds");
+        const maxUses = readOptionalNumber(args, "maxUses");
+        const issuerUrl = readOptionalString(args, "issuerUrl");
         const bootstrapPeers = readOptionalStringArray(args, "bootstrapPeers");
         const result = await client.createJoinToken({
           expiresInSeconds,
+          maxUses,
+          issuerUrl,
           bootstrapPeers
         });
         return asTextResult(result);

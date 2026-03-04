@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { URL } from "node:url";
 
 export const P2P_HEADERS = {
   networkId: "x-lucy-network-id",
@@ -10,8 +11,9 @@ export const P2P_HEADERS = {
 } as const;
 
 const SIGNATURE_ALGO_VERSION = "v1";
+const JOIN_TOKEN_VERSION = 2;
 
-export interface JoinTokenPayload {
+export interface LegacyJoinTokenPayloadV1 {
   version: 1;
   networkId: string;
   networkKey: string;
@@ -19,6 +21,21 @@ export interface JoinTokenPayload {
   issuedAt: string;
   expiresAt: string;
 }
+
+export interface JoinTokenPayloadV2 {
+  version: 2;
+  networkId: string;
+  issuerNodeId: string;
+  issuerUrl: string;
+  inviteId: string;
+  inviteSecret: string;
+  bootstrapPeers: string[];
+  maxUses: number;
+  issuedAt: string;
+  expiresAt: string;
+}
+
+export type JoinTokenPayload = LegacyJoinTokenPayloadV1 | JoinTokenPayloadV2;
 
 export interface SignP2PRequestInput {
   method: string;
@@ -50,19 +67,31 @@ export function generateNetworkKey(): string {
   return randomBytes(32).toString("base64url");
 }
 
+export function generateInviteId(): string {
+  return randomBytes(12).toString("base64url");
+}
+
+export function generateInviteSecret(): string {
+  return randomBytes(24).toString("base64url");
+}
+
 export function sha256Hex(input: string): string {
   return createHash("sha256").update(input).digest("hex");
 }
 
 export function createJoinToken(input: {
   networkId: string;
-  networkKey: string;
+  issuerNodeId: string;
+  issuerUrl: string;
+  inviteId: string;
+  inviteSecret: string;
   bootstrapPeers: string[];
   expiresInSeconds: number;
+  maxUses: number;
   now?: Date;
 }): {
   token: string;
-  payload: JoinTokenPayload;
+  payload: JoinTokenPayloadV2;
 } {
   const now = input.now ?? new Date();
   const issuedAt = now.toISOString();
@@ -70,11 +99,15 @@ export function createJoinToken(input: {
     now.getTime() + input.expiresInSeconds * 1000
   ).toISOString();
 
-  const payload: JoinTokenPayload = {
-    version: 1,
+  const payload: JoinTokenPayloadV2 = {
+    version: JOIN_TOKEN_VERSION,
     networkId: normalizeNetworkId(input.networkId),
-    networkKey: normalizeNetworkKey(input.networkKey),
+    issuerNodeId: normalizeSenderNodeId(input.issuerNodeId),
+    issuerUrl: normalizeIssuerUrl(input.issuerUrl),
+    inviteId: normalizeInviteId(input.inviteId),
+    inviteSecret: normalizeInviteSecret(input.inviteSecret),
     bootstrapPeers: dedupePeers(input.bootstrapPeers),
+    maxUses: normalizeJoinTokenMaxUses(input.maxUses),
     issuedAt,
     expiresAt
   };
@@ -107,31 +140,21 @@ export function parseJoinToken(token: string): JoinTokenPayload {
   }
 
   const record = payload as Record<string, unknown>;
+  const version = Number(record.version);
 
-  if (record.version !== 1) {
-    throw new Error("Unsupported joinToken version");
+  if (version === 1) {
+    return parseLegacyJoinToken(record);
   }
 
-  if (typeof record.issuedAt !== "string" || Number.isNaN(Date.parse(record.issuedAt))) {
-    throw new Error("joinToken missing valid issuedAt");
+  if (version === JOIN_TOKEN_VERSION) {
+    return parseJoinTokenV2(record);
   }
 
-  if (typeof record.expiresAt !== "string" || Number.isNaN(Date.parse(record.expiresAt))) {
-    throw new Error("joinToken missing valid expiresAt");
-  }
+  throw new Error("Unsupported joinToken version");
+}
 
-  const bootstrapPeers = Array.isArray(record.bootstrapPeers)
-    ? record.bootstrapPeers.filter((value): value is string => typeof value === "string")
-    : [];
-
-  return {
-    version: 1,
-    networkId: normalizeNetworkId(String(record.networkId ?? "")),
-    networkKey: normalizeNetworkKey(String(record.networkKey ?? "")),
-    bootstrapPeers: dedupePeers(bootstrapPeers),
-    issuedAt: record.issuedAt,
-    expiresAt: record.expiresAt
-  };
+export function isJoinTokenV2(payload: JoinTokenPayload): payload is JoinTokenPayloadV2 {
+  return payload.version === JOIN_TOKEN_VERSION;
 }
 
 export function assertJoinTokenNotExpired(
@@ -292,12 +315,132 @@ export function normalizeNetworkKey(networkKey: string): string {
   return normalized;
 }
 
+export function normalizeIssuerUrl(issuerUrl: string): string {
+  const normalized = issuerUrl.trim();
+
+  if (!normalized) {
+    throw new Error("issuerUrl is required");
+  }
+
+  let parsed: URL;
+
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    throw new Error("issuerUrl must be a valid URL");
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("issuerUrl must use http or https");
+  }
+
+  return parsed.toString().replace(/\/+$/, "");
+}
+
+export function normalizeJoinTokenMaxUses(maxUses: number): number {
+  if (!Number.isFinite(maxUses)) {
+    throw new Error("maxUses must be finite");
+  }
+
+  const rounded = Math.floor(maxUses);
+
+  if (rounded < 1) {
+    throw new Error("maxUses must be at least 1");
+  }
+
+  if (rounded > 1000) {
+    throw new Error("maxUses must be at most 1000");
+  }
+
+  return rounded;
+}
+
 export function dedupePeers(peers: string[]): string[] {
   const normalized = peers
     .map((peer) => peer.trim().replace(/\/+$/, ""))
     .filter((peer) => peer.length > 0);
 
   return [...new Set(normalized)];
+}
+
+function parseLegacyJoinToken(record: Record<string, unknown>): LegacyJoinTokenPayloadV1 {
+  if (typeof record.issuedAt !== "string" || Number.isNaN(Date.parse(record.issuedAt))) {
+    throw new Error("joinToken missing valid issuedAt");
+  }
+
+  if (typeof record.expiresAt !== "string" || Number.isNaN(Date.parse(record.expiresAt))) {
+    throw new Error("joinToken missing valid expiresAt");
+  }
+
+  const bootstrapPeers = Array.isArray(record.bootstrapPeers)
+    ? record.bootstrapPeers.filter((value): value is string => typeof value === "string")
+    : [];
+
+  return {
+    version: 1,
+    networkId: normalizeNetworkId(String(record.networkId ?? "")),
+    networkKey: normalizeNetworkKey(String(record.networkKey ?? "")),
+    bootstrapPeers: dedupePeers(bootstrapPeers),
+    issuedAt: record.issuedAt,
+    expiresAt: record.expiresAt
+  };
+}
+
+function parseJoinTokenV2(record: Record<string, unknown>): JoinTokenPayloadV2 {
+  if (typeof record.issuedAt !== "string" || Number.isNaN(Date.parse(record.issuedAt))) {
+    throw new Error("joinToken missing valid issuedAt");
+  }
+
+  if (typeof record.expiresAt !== "string" || Number.isNaN(Date.parse(record.expiresAt))) {
+    throw new Error("joinToken missing valid expiresAt");
+  }
+
+  const bootstrapPeers = Array.isArray(record.bootstrapPeers)
+    ? record.bootstrapPeers.filter((value): value is string => typeof value === "string")
+    : [];
+
+  const maxUsesRaw = Number(record.maxUses ?? 1);
+
+  return {
+    version: JOIN_TOKEN_VERSION,
+    networkId: normalizeNetworkId(String(record.networkId ?? "")),
+    issuerNodeId: normalizeSenderNodeId(String(record.issuerNodeId ?? "")),
+    issuerUrl: normalizeIssuerUrl(String(record.issuerUrl ?? "")),
+    inviteId: normalizeInviteId(String(record.inviteId ?? "")),
+    inviteSecret: normalizeInviteSecret(String(record.inviteSecret ?? "")),
+    bootstrapPeers: dedupePeers(bootstrapPeers),
+    maxUses: normalizeJoinTokenMaxUses(maxUsesRaw),
+    issuedAt: record.issuedAt,
+    expiresAt: record.expiresAt
+  };
+}
+
+function normalizeInviteId(inviteId: string): string {
+  const normalized = inviteId.trim();
+
+  if (!normalized) {
+    throw new Error("inviteId is required");
+  }
+
+  if (!/^[A-Za-z0-9_-]{8,120}$/.test(normalized)) {
+    throw new Error("inviteId must be 8-120 chars and use [A-Za-z0-9_-]");
+  }
+
+  return normalized;
+}
+
+function normalizeInviteSecret(inviteSecret: string): string {
+  const normalized = inviteSecret.trim();
+
+  if (!normalized) {
+    throw new Error("inviteSecret is required");
+  }
+
+  if (normalized.length < 16 || normalized.length > 256) {
+    throw new Error("inviteSecret must be between 16 and 256 characters");
+  }
+
+  return normalized;
 }
 
 function normalizeSenderNodeId(senderNodeId: string): string {

@@ -52,7 +52,7 @@ export interface NetworkState {
   updatedAt: string | null;
 }
 
-export interface JoinTokenPayload {
+export interface LegacyJoinTokenPayloadV1 {
   version: 1;
   networkId: string;
   networkKey: string;
@@ -60,6 +60,21 @@ export interface JoinTokenPayload {
   issuedAt: string;
   expiresAt: string;
 }
+
+export interface JoinTokenPayloadV2 {
+  version: 2;
+  networkId: string;
+  issuerNodeId: string;
+  issuerUrl: string;
+  inviteId: string;
+  inviteSecret: string;
+  bootstrapPeers: string[];
+  maxUses: number;
+  issuedAt: string;
+  expiresAt: string;
+}
+
+export type JoinTokenPayload = LegacyJoinTokenPayloadV1 | JoinTokenPayloadV2;
 
 export class MeshNodeClient {
   private readonly baseUrl: string;
@@ -95,6 +110,8 @@ export class MeshNodeClient {
     networkKey?: string;
     bootstrapPeers?: string[];
     joinTokenExpiresInSeconds?: number;
+    joinTokenMaxUses?: number;
+    joinTokenIssuerUrl?: string;
   }): Promise<{
     network: NetworkState;
     joinToken: string;
@@ -105,6 +122,8 @@ export class MeshNodeClient {
 
   public async createJoinToken(input?: {
     expiresInSeconds?: number;
+    maxUses?: number;
+    issuerUrl?: string;
     bootstrapPeers?: string[];
   }): Promise<{
     joinToken: string;

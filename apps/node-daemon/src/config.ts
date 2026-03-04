@@ -1,4 +1,5 @@
 import path from "node:path";
+import { URL } from "node:url";
 
 export interface NodeConfig {
   host: string;
@@ -6,6 +7,7 @@ export interface NodeConfig {
   dataDir: string;
   dbPath: string;
   nodeName?: string;
+  publicBaseUrl: string;
   networkId?: string;
   networkKey?: string;
   peers: string[];
@@ -48,6 +50,11 @@ export function loadNodeConfig(): NodeConfig {
     dataDir,
     dbPath: path.join(dataDir, "mesh.sqlite"),
     nodeName: process.env.NODE_NAME?.trim() || undefined,
+    publicBaseUrl: normalizePublicBaseUrl(
+      process.env.PUBLIC_BASE_URL,
+      host,
+      port
+    ),
     networkId: process.env.NETWORK_ID?.trim() || undefined,
     networkKey: process.env.NETWORK_KEY?.trim() || undefined,
     peers: parsePeers(process.env.PEER_URLS),
@@ -55,4 +62,26 @@ export function loadNodeConfig(): NodeConfig {
     p2pAuthSkewMs: parseNumber(process.env.P2P_AUTH_SKEW_MS, 300000),
     maxBodyBytes: parseNumber(process.env.MAX_BODY_BYTES, 512 * 1024)
   };
+}
+
+function normalizePublicBaseUrl(
+  value: string | undefined,
+  host: string,
+  port: number
+): string {
+  const raw = value?.trim() || `http://${host}:${port}`;
+
+  let parsed: URL;
+
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error("PUBLIC_BASE_URL must be a valid URL");
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("PUBLIC_BASE_URL must use http or https");
+  }
+
+  return parsed.toString().replace(/\/+$/, "");
 }

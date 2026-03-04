@@ -26,9 +26,11 @@ const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url ?? "/", `http://${host}`);
     const method = request.method ?? "GET";
     const isP2PRoute = requestUrl.pathname.startsWith("/p2p/");
+    const requiresP2PAuth =
+      isP2PRoute && requestUrl.pathname !== "/p2p/network/redeem";
     let p2pBodyText = "";
 
-    if (isP2PRoute) {
+    if (requiresP2PAuth) {
       p2pBodyText = await readRawBody(request, config.maxBodyBytes);
 
       const verification = meshNode.verifyIncomingP2PRequest({
@@ -69,13 +71,17 @@ const server = http.createServer(async (request, response) => {
         networkKey?: string;
         bootstrapPeers?: string[];
         joinTokenExpiresInSeconds?: number;
+        joinTokenMaxUses?: number;
+        joinTokenIssuerUrl?: string;
       }>(request, config.maxBodyBytes);
 
       const result = meshNode.initNetwork({
         networkId: body.networkId,
         networkKey: body.networkKey,
         bootstrapPeers: body.bootstrapPeers,
-        joinTokenExpiresInSeconds: body.joinTokenExpiresInSeconds
+        joinTokenExpiresInSeconds: body.joinTokenExpiresInSeconds,
+        joinTokenMaxUses: body.joinTokenMaxUses,
+        joinTokenIssuerUrl: body.joinTokenIssuerUrl
       });
 
       sendJson(response, 200, result);
@@ -85,11 +91,15 @@ const server = http.createServer(async (request, response) => {
     if (method === "POST" && requestUrl.pathname === "/v1/network/token") {
       const body = await readJsonBody<{
         expiresInSeconds?: number;
+        maxUses?: number;
+        issuerUrl?: string;
         bootstrapPeers?: string[];
       }>(request, config.maxBodyBytes);
 
       const result = meshNode.createJoinToken({
         expiresInSeconds: body.expiresInSeconds,
+        maxUses: body.maxUses,
+        issuerUrl: body.issuerUrl,
         bootstrapPeers: body.bootstrapPeers
       });
 
@@ -108,7 +118,7 @@ const server = http.createServer(async (request, response) => {
         return;
       }
 
-      const result = meshNode.joinNetwork(body.joinToken);
+      const result = await meshNode.joinNetwork(body.joinToken);
       sendJson(response, 200, result);
       return;
     }
@@ -292,6 +302,29 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (method === "POST" && requestUrl.pathname === "/p2p/network/redeem") {
+      const body = await readJsonBody<{
+        joinToken?: string;
+        requesterNodeId?: string;
+        requesterPublicKeyB64?: string;
+        requesterDisplayName?: string | null;
+      }>(request, config.maxBodyBytes);
+
+      if (!body.joinToken) {
+        sendError(response, 400, "joinToken is required");
+        return;
+      }
+
+      const result = meshNode.redeemJoinToken(body.joinToken, {
+        requesterNodeId: body.requesterNodeId,
+        requesterPublicKeyB64: body.requesterPublicKeyB64,
+        requesterDisplayName: body.requesterDisplayName
+      });
+
+      sendJson(response, 200, result);
+      return;
+    }
+
     if (method === "POST" && requestUrl.pathname === "/p2p/events") {
       const body = parseRawJsonOrError<PeerEventsBody>(response, p2pBodyText);
 
@@ -456,9 +489,15 @@ function isClientInputError(message: string): boolean {
     message.includes("Invalid JSON body") ||
     message.includes("Invalid joinToken") ||
     message.includes("joinToken has expired") ||
+    message.includes("joinToken invite") ||
+    message.includes("joinToken issuer") ||
+    message.includes("joinToken redemption") ||
+    message.includes("Legacy joinToken") ||
     message.includes("Network is not configured") ||
     message.includes("required") ||
     message.includes("must ") ||
+    message.includes("mismatch") ||
+    message.includes("does not match") ||
     message.includes("Unknown recipientNodeId") ||
     message.includes("exceeds max length")
   );

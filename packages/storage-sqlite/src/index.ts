@@ -46,6 +46,29 @@ export interface NetworkConfigRecord {
   updatedAt: string;
 }
 
+export interface NetworkInviteRecord {
+  inviteId: string;
+  inviteSecretHash: string;
+  networkId: string;
+  networkKeySnapshot: string;
+  issuerNodeId: string;
+  issuerUrl: string;
+  bootstrapPeers: string[];
+  expiresAt: string;
+  maxUses: number;
+  usedCount: number;
+  revoked: boolean;
+  lastUsedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ConsumeNetworkInviteResult {
+  ok: boolean;
+  reason?: string;
+  invite?: NetworkInviteRecord;
+}
+
 interface EventRow {
   local_seq: number;
   id: string;
@@ -61,6 +84,23 @@ interface EventRow {
   wall_time: string;
   signature: string;
   created_at: string;
+}
+
+interface NetworkInviteRow {
+  invite_id: string;
+  invite_secret_hash: string;
+  network_id: string;
+  network_key_snapshot: string;
+  issuer_node_id: string;
+  issuer_url: string;
+  bootstrap_peers_json: string;
+  expires_at: string;
+  max_uses: number;
+  used_count: number;
+  revoked: number;
+  last_used_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export class SQLiteMeshStore {
@@ -209,6 +249,231 @@ export class SQLiteMeshStore {
       createdAt,
       updatedAt: now
     };
+  }
+
+  public createNetworkInvite(input: {
+    inviteId: string;
+    inviteSecretHash: string;
+    networkId: string;
+    networkKeySnapshot: string;
+    issuerNodeId: string;
+    issuerUrl: string;
+    bootstrapPeers: string[];
+    expiresAt: string;
+    maxUses: number;
+  }): NetworkInviteRecord {
+    const now = new Date().toISOString();
+    const bootstrapPeersJson = JSON.stringify(input.bootstrapPeers);
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO network_invites (
+          invite_id,
+          invite_secret_hash,
+          network_id,
+          network_key_snapshot,
+          issuer_node_id,
+          issuer_url,
+          bootstrap_peers_json,
+          expires_at,
+          max_uses,
+          used_count,
+          revoked,
+          last_used_at,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NULL, ?, ?)
+        `
+      )
+      .run(
+        input.inviteId,
+        input.inviteSecretHash,
+        input.networkId,
+        input.networkKeySnapshot,
+        input.issuerNodeId,
+        input.issuerUrl,
+        bootstrapPeersJson,
+        input.expiresAt,
+        input.maxUses,
+        now,
+        now
+      );
+
+    const created = this.getNetworkInvite(input.inviteId);
+
+    if (!created) {
+      throw new Error("failed to persist network invite");
+    }
+
+    return created;
+  }
+
+  public getNetworkInvite(inviteId: string): NetworkInviteRecord | null {
+    const row = this.db
+      .prepare(
+        `
+        SELECT
+          invite_id,
+          invite_secret_hash,
+          network_id,
+          network_key_snapshot,
+          issuer_node_id,
+          issuer_url,
+          bootstrap_peers_json,
+          expires_at,
+          max_uses,
+          used_count,
+          revoked,
+          last_used_at,
+          created_at,
+          updated_at
+        FROM network_invites
+        WHERE invite_id = ?
+        LIMIT 1
+        `
+      )
+      .get(inviteId) as NetworkInviteRow | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    return this.toNetworkInviteRecord(row);
+  }
+
+  public consumeNetworkInvite(input: {
+    inviteId: string;
+    inviteSecretHash: string;
+    now?: Date;
+  }): ConsumeNetworkInviteResult {
+    const nowIso = (input.now ?? new Date()).toISOString();
+    this.db.exec("BEGIN IMMEDIATE;");
+
+    try {
+      const row = this.db
+        .prepare(
+          `
+          SELECT
+            invite_id,
+            invite_secret_hash,
+            network_id,
+            network_key_snapshot,
+            issuer_node_id,
+            issuer_url,
+            bootstrap_peers_json,
+            expires_at,
+            max_uses,
+            used_count,
+            revoked,
+            last_used_at,
+            created_at,
+            updated_at
+          FROM network_invites
+          WHERE invite_id = ?
+          LIMIT 1
+          `
+        )
+        .get(input.inviteId) as NetworkInviteRow | undefined;
+
+      if (!row) {
+        this.db.exec("COMMIT;");
+        return {
+          ok: false,
+          reason: "joinToken invite not found"
+        };
+      }
+
+      if (row.invite_secret_hash !== input.inviteSecretHash) {
+        this.db.exec("COMMIT;");
+        return {
+          ok: false,
+          reason: "joinToken invite secret mismatch"
+        };
+      }
+
+      if (row.revoked === 1) {
+        this.db.exec("COMMIT;");
+        return {
+          ok: false,
+          reason: "joinToken invite revoked"
+        };
+      }
+
+      const nowMs = Date.parse(nowIso);
+      const expiresMs = Date.parse(row.expires_at);
+
+      if (Number.isNaN(expiresMs) || nowMs > expiresMs) {
+        this.db.exec("COMMIT;");
+        return {
+          ok: false,
+          reason: "joinToken has expired"
+        };
+      }
+
+      if (row.used_count >= row.max_uses) {
+        this.db.exec("COMMIT;");
+        return {
+          ok: false,
+          reason: "joinToken invite has reached max uses"
+        };
+      }
+
+      this.db
+        .prepare(
+          `
+          UPDATE network_invites
+          SET
+            used_count = used_count + 1,
+            last_used_at = ?,
+            updated_at = ?
+          WHERE invite_id = ?
+          `
+        )
+        .run(nowIso, nowIso, input.inviteId);
+
+      const updatedRow = this.db
+        .prepare(
+          `
+          SELECT
+            invite_id,
+            invite_secret_hash,
+            network_id,
+            network_key_snapshot,
+            issuer_node_id,
+            issuer_url,
+            bootstrap_peers_json,
+            expires_at,
+            max_uses,
+            used_count,
+            revoked,
+            last_used_at,
+            created_at,
+            updated_at
+          FROM network_invites
+          WHERE invite_id = ?
+          LIMIT 1
+          `
+        )
+        .get(input.inviteId) as NetworkInviteRow | undefined;
+
+      this.db.exec("COMMIT;");
+
+      if (!updatedRow) {
+        return {
+          ok: false,
+          reason: "joinToken invite update failed"
+        };
+      }
+
+      return {
+        ok: true,
+        invite: this.toNetworkInviteRecord(updatedRow)
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK;");
+      throw error;
+    }
   }
 
   public createConversation(conversationId: string): void {
@@ -831,6 +1096,38 @@ export class SQLiteMeshStore {
     };
   }
 
+  private toNetworkInviteRecord(row: NetworkInviteRow): NetworkInviteRecord {
+    let bootstrapPeers: string[] = [];
+
+    try {
+      const parsed = JSON.parse(row.bootstrap_peers_json) as unknown;
+      if (Array.isArray(parsed)) {
+        bootstrapPeers = parsed.filter(
+          (item): item is string => typeof item === "string"
+        );
+      }
+    } catch {
+      bootstrapPeers = [];
+    }
+
+    return {
+      inviteId: row.invite_id,
+      inviteSecretHash: row.invite_secret_hash,
+      networkId: row.network_id,
+      networkKeySnapshot: row.network_key_snapshot,
+      issuerNodeId: row.issuer_node_id,
+      issuerUrl: row.issuer_url,
+      bootstrapPeers,
+      expiresAt: row.expires_at,
+      maxUses: row.max_uses,
+      usedCount: row.used_count,
+      revoked: row.revoked === 1,
+      lastUsedAt: row.last_used_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   private initialize(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS node_identity (
@@ -915,6 +1212,29 @@ export class SQLiteMeshStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS network_invites (
+        invite_id TEXT PRIMARY KEY,
+        invite_secret_hash TEXT NOT NULL,
+        network_id TEXT NOT NULL,
+        network_key_snapshot TEXT NOT NULL,
+        issuer_node_id TEXT NOT NULL,
+        issuer_url TEXT NOT NULL,
+        bootstrap_peers_json TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        max_uses INTEGER NOT NULL,
+        used_count INTEGER NOT NULL DEFAULT 0,
+        revoked INTEGER NOT NULL DEFAULT 0,
+        last_used_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_network_invites_network
+        ON network_invites(network_id);
+
+      CREATE INDEX IF NOT EXISTS idx_network_invites_expires
+        ON network_invites(expires_at);
     `);
 
     this.ensureOptionalColumns();

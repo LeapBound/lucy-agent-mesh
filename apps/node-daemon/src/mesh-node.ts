@@ -25,11 +25,17 @@ import {
   assertJoinTokenNotExpired,
   createJoinToken,
   dedupePeers,
+  generateInviteId,
+  generateInviteSecret,
   generateNetworkId,
   generateNetworkKey,
+  isJoinTokenV2,
+  normalizeIssuerUrl,
+  normalizeJoinTokenMaxUses,
   normalizeNetworkId,
   normalizeNetworkKey,
   parseJoinToken,
+  sha256Hex,
   signP2PRequest,
   verifyP2PRequest,
   type JoinTokenPayload
@@ -113,11 +119,19 @@ export interface InitNetworkInput {
   networkKey?: string;
   bootstrapPeers?: string[];
   joinTokenExpiresInSeconds?: number;
+  joinTokenMaxUses?: number;
+  joinTokenIssuerUrl?: string;
 }
 
 export interface JoinNetworkResult {
   network: NetworkState;
   bootstrapPeers: string[];
+}
+
+export interface RedeemJoinTokenInput {
+  requesterNodeId?: string;
+  requesterPublicKeyB64?: string;
+  requesterDisplayName?: string | null;
 }
 
 interface PeerNodeInfo {
@@ -131,6 +145,7 @@ const MAX_SYNC_BATCH = 1000;
 export class MeshNode extends EventEmitter {
   private readonly store: SQLiteMeshStore;
   private readonly p2pAuthSkewMs: number;
+  private readonly publicBaseUrl: string;
 
   public readonly identity;
   private localDisplayName: string | null;
@@ -141,6 +156,7 @@ export class MeshNode extends EventEmitter {
     super();
     this.store = new SQLiteMeshStore(config.dbPath);
     this.p2pAuthSkewMs = Math.max(config.p2pAuthSkewMs, 30000);
+    this.publicBaseUrl = normalizeIssuerUrl(config.publicBaseUrl);
     this.identity = this.store.getOrCreateIdentity();
     this.localDisplayName = this.store.getLocalDisplayName();
     this.networkConfig = this.store.getNetworkConfig();
@@ -207,24 +223,24 @@ export class MeshNode extends EventEmitter {
       this.store.upsertPeer(peer);
     }
 
-    const token = createJoinToken({
-      networkId,
-      networkKey,
-      bootstrapPeers,
-      expiresInSeconds: normalizeJoinTokenExpiresInSeconds(
-        input.joinTokenExpiresInSeconds
-      )
+    const token = this.createJoinToken({
+      expiresInSeconds: input.joinTokenExpiresInSeconds,
+      maxUses: input.joinTokenMaxUses,
+      issuerUrl: input.joinTokenIssuerUrl,
+      bootstrapPeers
     });
 
     return {
       network: this.getNetworkState(),
-      joinToken: token.token,
-      joinTokenPayload: token.payload
+      joinToken: token.joinToken,
+      joinTokenPayload: token.joinTokenPayload
     };
   }
 
   public createJoinToken(input?: {
     expiresInSeconds?: number;
+    maxUses?: number;
+    issuerUrl?: string;
     bootstrapPeers?: string[];
   }): {
     joinToken: string;
@@ -236,16 +252,44 @@ export class MeshNode extends EventEmitter {
       );
     }
 
+    const issuerUrl = normalizeIssuerUrl(input?.issuerUrl ?? this.publicBaseUrl);
     const bootstrapPeers = dedupePeers([
+      issuerUrl,
       ...this.store.listPeers().map((peer) => peer.url),
       ...(input?.bootstrapPeers ?? [])
     ]);
 
+    for (const peer of bootstrapPeers) {
+      this.store.upsertPeer(peer);
+    }
+
+    const expiresInSeconds = normalizeJoinTokenExpiresInSeconds(input?.expiresInSeconds);
+    const maxUses = normalizeJoinTokenMaxUsesInput(input?.maxUses);
+    const inviteId = generateInviteId();
+    const inviteSecret = generateInviteSecret();
+    const expiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
+
+    this.store.createNetworkInvite({
+      inviteId,
+      inviteSecretHash: sha256Hex(inviteSecret),
+      networkId: this.networkConfig.networkId,
+      networkKeySnapshot: this.networkConfig.networkKey,
+      issuerNodeId: this.identity.nodeId,
+      issuerUrl,
+      bootstrapPeers,
+      expiresAt,
+      maxUses
+    });
+
     const token = createJoinToken({
       networkId: this.networkConfig.networkId,
-      networkKey: this.networkConfig.networkKey,
+      issuerNodeId: this.identity.nodeId,
+      issuerUrl,
+      inviteId,
+      inviteSecret,
       bootstrapPeers,
-      expiresInSeconds: normalizeJoinTokenExpiresInSeconds(input?.expiresInSeconds)
+      expiresInSeconds,
+      maxUses
     });
 
     return {
@@ -254,16 +298,60 @@ export class MeshNode extends EventEmitter {
     };
   }
 
-  public joinNetwork(joinToken: string): JoinNetworkResult {
+  public async joinNetwork(joinToken: string): Promise<JoinNetworkResult> {
     const payload = parseJoinToken(joinToken);
     assertJoinTokenNotExpired(payload);
 
-    this.networkConfig = this.store.setNetworkConfig({
-      networkId: payload.networkId,
-      networkKey: payload.networkKey
+    if (!isJoinTokenV2(payload)) {
+      this.networkConfig = this.store.setNetworkConfig({
+        networkId: payload.networkId,
+        networkKey: payload.networkKey
+      });
+
+      const legacyBootstrapPeers = dedupePeers(payload.bootstrapPeers);
+
+      for (const peer of legacyBootstrapPeers) {
+        this.store.upsertPeer(peer);
+      }
+
+      return {
+        network: this.getNetworkState(),
+        bootstrapPeers: legacyBootstrapPeers
+      };
+    }
+
+    const redemption = await this.postJson<{
+      networkId: string;
+      networkKey: string;
+      bootstrapPeers: string[];
+      inviteId: string;
+      issuerNodeId: string;
+    }>(`${payload.issuerUrl}/p2p/network/redeem`, {
+      joinToken,
+      requesterNodeId: this.identity.nodeId,
+      requesterPublicKeyB64: this.identity.publicKeyB64,
+      requesterDisplayName: this.localDisplayName
     });
 
-    const bootstrapPeers = dedupePeers(payload.bootstrapPeers);
+    const redeemedNetworkId = normalizeNetworkId(redemption.networkId);
+
+    if (redeemedNetworkId !== payload.networkId) {
+      throw new Error("joinToken redemption returned mismatched networkId");
+    }
+
+    this.networkConfig = this.store.setNetworkConfig({
+      networkId: redeemedNetworkId,
+      networkKey: normalizeNetworkKey(redemption.networkKey)
+    });
+
+    const redeemedPeers = Array.isArray(redemption.bootstrapPeers)
+      ? redemption.bootstrapPeers
+      : [];
+    const bootstrapPeers = dedupePeers([
+      payload.issuerUrl,
+      ...payload.bootstrapPeers,
+      ...redeemedPeers
+    ]);
 
     for (const peer of bootstrapPeers) {
       this.store.upsertPeer(peer);
@@ -272,6 +360,75 @@ export class MeshNode extends EventEmitter {
     return {
       network: this.getNetworkState(),
       bootstrapPeers
+    };
+  }
+
+  public redeemJoinToken(
+    joinToken: string,
+    input?: RedeemJoinTokenInput
+  ): {
+    networkId: string;
+    networkKey: string;
+    bootstrapPeers: string[];
+    inviteId: string;
+    issuerNodeId: string;
+  } {
+    if (!this.networkConfig) {
+      throw new Error(
+        "Network is not configured on issuer. Call /v1/network/init or /v1/network/join first."
+      );
+    }
+
+    if (input?.requesterNodeId && input.requesterNodeId.length > 256) {
+      throw new Error("requesterNodeId exceeds max length 256");
+    }
+
+    if (input?.requesterPublicKeyB64 && input.requesterPublicKeyB64.length > 2048) {
+      throw new Error("requesterPublicKeyB64 exceeds max length 2048");
+    }
+
+    if (input?.requesterDisplayName && input.requesterDisplayName.length > 120) {
+      throw new Error("requesterDisplayName exceeds max length 120");
+    }
+
+    const payload = parseJoinToken(joinToken);
+    assertJoinTokenNotExpired(payload);
+
+    if (!isJoinTokenV2(payload)) {
+      throw new Error(
+        "Legacy joinToken cannot be redeemed. Use /v1/network/join on the target node."
+      );
+    }
+
+    if (payload.issuerNodeId !== this.identity.nodeId) {
+      throw new Error("joinToken issuer node mismatch");
+    }
+
+    if (payload.networkId !== this.networkConfig.networkId) {
+      throw new Error("joinToken networkId does not match issuer network");
+    }
+
+    const consumeResult = this.store.consumeNetworkInvite({
+      inviteId: payload.inviteId,
+      inviteSecretHash: sha256Hex(payload.inviteSecret)
+    });
+
+    if (!consumeResult.ok || !consumeResult.invite) {
+      throw new Error(consumeResult.reason ?? "joinToken redemption failed");
+    }
+
+    const bootstrapPeers = dedupePeers([
+      consumeResult.invite.issuerUrl,
+      ...consumeResult.invite.bootstrapPeers,
+      ...this.store.listPeers().map((peer) => peer.url)
+    ]);
+
+    return {
+      networkId: this.networkConfig.networkId,
+      networkKey: this.networkConfig.networkKey,
+      bootstrapPeers,
+      inviteId: consumeResult.invite.inviteId,
+      issuerNodeId: this.identity.nodeId
     };
   }
 
@@ -881,6 +1038,10 @@ export class MeshNode extends EventEmitter {
       return {};
     }
 
+    if (path === "/p2p/network/redeem") {
+      return {};
+    }
+
     if (!this.networkConfig) {
       throw new Error(
         "Network is not configured. Call /v1/network/init or /v1/network/join first."
@@ -1034,6 +1195,14 @@ function normalizeJoinTokenExpiresInSeconds(input?: number): number {
   }
 
   return rounded;
+}
+
+function normalizeJoinTokenMaxUsesInput(input?: number): number {
+  if (input === undefined) {
+    return 1;
+  }
+
+  return normalizeJoinTokenMaxUses(input);
 }
 
 function aggregateDirectory(entries: PeerDirectoryEntry[]): Array<{

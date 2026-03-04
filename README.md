@@ -34,6 +34,7 @@
 - 直发路由：按 `recipientNodeId` 定位
 - 本地通讯录：`alias/role/capabilities/notes`
 - 密钥入网：`init -> join token -> join`
+- 邀请码治理：`TTL + maxUses`，泄漏后影响面更小
 - P2P 鉴权：`/p2p/*` 请求体哈希 + HMAC 签名 + nonce 防重放
 
 > 不依赖 Docker。运行时使用 Node 内置 `node:sqlite`（Node.js 22+，建议 24+）。
@@ -84,6 +85,9 @@ JOIN_TOKEN=$(curl -s http://127.0.0.1:7010/v1/network/token \
   -H "content-type: application/json" \
   -d '{"bootstrapPeers":["http://127.0.0.1:7010"]}' | jq -r '.joinToken')
 ```
+
+> 当前 `joinToken` 不再直接携带明文 `networkKey`，而是邀请码（`inviteId + inviteSecret`），需要向签发节点兑换后才能入网。
+> 可选参数：`expiresInSeconds`、`maxUses`、`issuerUrl`。
 
 ### 5) 在 B 使用 token 入网
 
@@ -250,6 +254,7 @@ const { joinToken } = await client.createJoinToken({
 - `GET /p2p/node-info`
 - `POST /p2p/events`
 - `POST /p2p/sync`
+- `POST /p2p/network/redeem`（入网兑换接口，不走网内鉴权头）
 
 > 所有 `/p2p/*` 请求都要求带网络鉴权头（networkId + 签名 + nonce + 时间戳）。
 
@@ -263,6 +268,7 @@ const { joinToken } = await client.createJoinToken({
 - `NODE_NAME`（可选，本地 agent 显示名）
 - `DATA_DIR`（默认 `.local/node-<port>`）
 - `PEER_URLS`（逗号分隔）
+- `PUBLIC_BASE_URL`（可选，默认 `http://NODE_HOST:NODE_PORT`，用于生成可兑换的邀请码）
 - `NETWORK_ID`（可选：直接注入网络 ID）
 - `NETWORK_KEY`（可选：直接注入网络密钥）
 - `P2P_AUTH_SKEW_MS`（默认 `300000`）
