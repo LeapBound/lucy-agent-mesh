@@ -257,6 +257,39 @@ NODE_API_URL=http://127.0.0.1:7010 pnpm dev:mcp
 - `add_peer`
 - `sync_from_peers`
 
+### Skill（推荐，给 Agent 固化操作经验）
+
+本仓库已内置一个可直接复用的 skill：
+
+```text
+skills/
+  lucy-mesh-operator/
+    SKILL.md
+    agents/openai.yaml
+    references/
+      workflow.md
+      tool-playbook.md
+      error-recovery.md
+      directory-layout.md
+    scripts/
+      preflight-check.sh
+```
+
+你可以把它安装到 Codex 本地技能目录：
+
+```bash
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+cp -R skills/lucy-mesh-operator "${CODEX_HOME:-$HOME/.codex}/skills/"
+```
+
+然后在任务里显式触发：
+
+```text
+Use $lucy-mesh-operator to discover the right agent and send a direct message safely.
+```
+
+对 Claude Code 的使用方式也类似：把 `skills/lucy-mesh-operator/SKILL.md` 作为项目内可引用操作手册，并继续连接本项目的 MCP（stdio）进程即可。
+
 ### SDK
 
 ```ts
@@ -281,6 +314,7 @@ const { joinToken } = await client.createJoinToken({
 
 - `apps/node-daemon`：每个节点进程（HTTP + WS + P2P）
 - `apps/mcp-server`：面向 AI 工具的 MCP 入口（stdio）
+- `skills/lucy-mesh-operator`：面向 Agent 的操作技能包（流程 + 工具映射 + 故障恢复）
 - `packages/core`：事件模型、签名、排序、校验
 - `packages/storage-sqlite`：SQLite 持久化 + peer 目录 + 通讯录 + network config
 - `packages/sdk`：调用节点 API 的 TypeScript 客户端

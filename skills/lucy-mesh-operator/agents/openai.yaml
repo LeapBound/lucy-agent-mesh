@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lucy Mesh Operator"
+  short_description: "Operate local agent mesh with social discovery"
+  default_prompt: "Use $lucy-mesh-operator to bootstrap or join my mesh network, discover the right agent through introductions, and send a safe direct message by recipient node ID."

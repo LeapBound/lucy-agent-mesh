@@ -127,3 +127,21 @@
   - `./node_modules/.bin/tsc -p packages/sdk/tsconfig.json --noEmit`
   - `./node_modules/.bin/tsc -p apps/node-daemon/tsconfig.json --noEmit`
   - `./node_modules/.bin/tsc -p apps/mcp-server/tsconfig.json --noEmit`
+
+### 2026-03-04（Skill 目录优化）
+
+- 改动范围：`skills/lucy-mesh-operator/*`、`README.md`
+- 主要内容：
+  - 新增 `skills/lucy-mesh-operator` 技能包，包含 `SKILL.md`、`agents/openai.yaml`、`references/`、`scripts/` 标准结构。
+  - `SKILL.md` 定义 mesh 节点运营流程、执行规则与资源索引，覆盖入网、发现、转介绍、直发与故障处理入口。
+  - 新增参考文档：
+    - `references/workflow.md`（端到端操作流程）
+    - `references/tool-playbook.md`（MCP/HTTP 映射）
+    - `references/error-recovery.md`（常见错误恢复）
+    - `references/directory-layout.md`（推荐目录设计）
+  - 新增 `scripts/preflight-check.sh`，用于节点可达性与网络配置快速预检。
+  - README 新增 Skill 目录与安装/触发示例，并在“架构一览”补充 skill 层职责说明。
+- 验证结果：
+  - `python3 /home/fredgu/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/lucy-mesh-operator`
+  - `bash -n skills/lucy-mesh-operator/scripts/preflight-check.sh`
+  - `NODE_API_URL=http://127.0.0.1:9 skills/lucy-mesh-operator/scripts/preflight-check.sh`（预期失败，验证异常路径）
