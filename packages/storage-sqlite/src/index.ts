@@ -69,6 +69,42 @@ export interface ConsumeNetworkInviteResult {
   invite?: NetworkInviteRecord;
 }
 
+export interface IdentityChallengeRecord {
+  challengeId: string;
+  chain: string;
+  nodeId: string;
+  walletAddress: string;
+  cluster: string;
+  statement: string;
+  nonce: string;
+  issuedAt: string;
+  expiresAt: string;
+  usedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ConsumeIdentityChallengeResult {
+  ok: boolean;
+  reason?: string;
+  challenge?: IdentityChallengeRecord;
+}
+
+export interface IdentityBindingRecord {
+  chain: string;
+  nodeId: string;
+  walletAddress: string;
+  cluster: string;
+  challengeId: string;
+  proofSignatureB64: string;
+  anchorTxSignature: string | null;
+  identityCommitment: string;
+  boundAt: string;
+  revokedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface EventRow {
   local_seq: number;
   id: string;
@@ -99,6 +135,36 @@ interface NetworkInviteRow {
   used_count: number;
   revoked: number;
   last_used_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface IdentityChallengeRow {
+  challenge_id: string;
+  chain: string;
+  node_id: string;
+  wallet_address: string;
+  cluster: string;
+  statement: string;
+  nonce: string;
+  issued_at: string;
+  expires_at: string;
+  used_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface IdentityBindingRow {
+  chain: string;
+  node_id: string;
+  wallet_address: string;
+  cluster: string;
+  challenge_id: string;
+  proof_signature_b64: string;
+  anchor_tx_signature: string | null;
+  identity_commitment: string;
+  bound_at: string;
+  revoked_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -474,6 +540,342 @@ export class SQLiteMeshStore {
       this.db.exec("ROLLBACK;");
       throw error;
     }
+  }
+
+  public createIdentityChallenge(input: {
+    challengeId: string;
+    chain: string;
+    nodeId: string;
+    walletAddress: string;
+    cluster: string;
+    statement: string;
+    nonce: string;
+    issuedAt: string;
+    expiresAt: string;
+  }): IdentityChallengeRecord {
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO identity_challenges (
+          challenge_id,
+          chain,
+          node_id,
+          wallet_address,
+          cluster,
+          statement,
+          nonce,
+          issued_at,
+          expires_at,
+          used_at,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+        `
+      )
+      .run(
+        input.challengeId,
+        input.chain,
+        input.nodeId,
+        input.walletAddress,
+        input.cluster,
+        input.statement,
+        input.nonce,
+        input.issuedAt,
+        input.expiresAt,
+        now,
+        now
+      );
+
+    const created = this.getIdentityChallenge(input.challengeId);
+
+    if (!created) {
+      throw new Error("failed to persist identity challenge");
+    }
+
+    return created;
+  }
+
+  public getIdentityChallenge(challengeId: string): IdentityChallengeRecord | null {
+    const row = this.db
+      .prepare(
+        `
+        SELECT
+          challenge_id,
+          chain,
+          node_id,
+          wallet_address,
+          cluster,
+          statement,
+          nonce,
+          issued_at,
+          expires_at,
+          used_at,
+          created_at,
+          updated_at
+        FROM identity_challenges
+        WHERE challenge_id = ?
+        LIMIT 1
+        `
+      )
+      .get(challengeId) as IdentityChallengeRow | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    return this.toIdentityChallengeRecord(row);
+  }
+
+  public consumeIdentityChallenge(input: {
+    challengeId: string;
+    chain: string;
+    walletAddress: string;
+    now?: Date;
+  }): ConsumeIdentityChallengeResult {
+    const nowIso = (input.now ?? new Date()).toISOString();
+    this.db.exec("BEGIN IMMEDIATE;");
+
+    try {
+      const row = this.db
+        .prepare(
+          `
+          SELECT
+            challenge_id,
+            chain,
+            node_id,
+            wallet_address,
+            cluster,
+            statement,
+            nonce,
+            issued_at,
+            expires_at,
+            used_at,
+            created_at,
+            updated_at
+          FROM identity_challenges
+          WHERE challenge_id = ?
+          LIMIT 1
+          `
+        )
+        .get(input.challengeId) as IdentityChallengeRow | undefined;
+
+      if (!row) {
+        this.db.exec("COMMIT;");
+        return {
+          ok: false,
+          reason: "identity challenge not found"
+        };
+      }
+
+      if (row.chain !== input.chain) {
+        this.db.exec("COMMIT;");
+        return {
+          ok: false,
+          reason: "identity challenge chain mismatch"
+        };
+      }
+
+      if (row.wallet_address !== input.walletAddress) {
+        this.db.exec("COMMIT;");
+        return {
+          ok: false,
+          reason: "identity challenge wallet mismatch"
+        };
+      }
+
+      if (row.used_at) {
+        this.db.exec("COMMIT;");
+        return {
+          ok: false,
+          reason: "identity challenge already used"
+        };
+      }
+
+      const nowMs = Date.parse(nowIso);
+      const expiresMs = Date.parse(row.expires_at);
+
+      if (Number.isNaN(expiresMs) || nowMs > expiresMs) {
+        this.db.exec("COMMIT;");
+        return {
+          ok: false,
+          reason: "identity challenge has expired"
+        };
+      }
+
+      this.db
+        .prepare(
+          `
+          UPDATE identity_challenges
+          SET used_at = ?, updated_at = ?
+          WHERE challenge_id = ?
+          `
+        )
+        .run(nowIso, nowIso, input.challengeId);
+
+      const updatedRow = this.db
+        .prepare(
+          `
+          SELECT
+            challenge_id,
+            chain,
+            node_id,
+            wallet_address,
+            cluster,
+            statement,
+            nonce,
+            issued_at,
+            expires_at,
+            used_at,
+            created_at,
+            updated_at
+          FROM identity_challenges
+          WHERE challenge_id = ?
+          LIMIT 1
+          `
+        )
+        .get(input.challengeId) as IdentityChallengeRow | undefined;
+
+      this.db.exec("COMMIT;");
+
+      if (!updatedRow) {
+        return {
+          ok: false,
+          reason: "identity challenge update failed"
+        };
+      }
+
+      return {
+        ok: true,
+        challenge: this.toIdentityChallengeRecord(updatedRow)
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  public upsertIdentityBinding(input: {
+    chain: string;
+    nodeId: string;
+    walletAddress: string;
+    cluster: string;
+    challengeId: string;
+    proofSignatureB64: string;
+    anchorTxSignature: string | null;
+    identityCommitment: string;
+    boundAt?: string;
+  }): IdentityBindingRecord {
+    const now = new Date().toISOString();
+    const boundAt = input.boundAt ?? now;
+    const existing = this.getIdentityBinding(input.chain);
+    const createdAt = existing?.createdAt ?? now;
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO identity_bindings (
+          chain,
+          node_id,
+          wallet_address,
+          cluster,
+          challenge_id,
+          proof_signature_b64,
+          anchor_tx_signature,
+          identity_commitment,
+          bound_at,
+          revoked_at,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+        ON CONFLICT(chain) DO UPDATE SET
+          node_id = excluded.node_id,
+          wallet_address = excluded.wallet_address,
+          cluster = excluded.cluster,
+          challenge_id = excluded.challenge_id,
+          proof_signature_b64 = excluded.proof_signature_b64,
+          anchor_tx_signature = excluded.anchor_tx_signature,
+          identity_commitment = excluded.identity_commitment,
+          bound_at = excluded.bound_at,
+          revoked_at = NULL,
+          updated_at = excluded.updated_at
+        `
+      )
+      .run(
+        input.chain,
+        input.nodeId,
+        input.walletAddress,
+        input.cluster,
+        input.challengeId,
+        input.proofSignatureB64,
+        input.anchorTxSignature,
+        input.identityCommitment,
+        boundAt,
+        createdAt,
+        now
+      );
+
+    const updated = this.getIdentityBinding(input.chain);
+
+    if (!updated) {
+      throw new Error("failed to persist identity binding");
+    }
+
+    return updated;
+  }
+
+  public getIdentityBinding(chain: string): IdentityBindingRecord | null {
+    const row = this.db
+      .prepare(
+        `
+        SELECT
+          chain,
+          node_id,
+          wallet_address,
+          cluster,
+          challenge_id,
+          proof_signature_b64,
+          anchor_tx_signature,
+          identity_commitment,
+          bound_at,
+          revoked_at,
+          created_at,
+          updated_at
+        FROM identity_bindings
+        WHERE chain = ?
+        LIMIT 1
+        `
+      )
+      .get(chain) as IdentityBindingRow | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    return this.toIdentityBindingRecord(row);
+  }
+
+  public revokeIdentityBinding(chain: string): IdentityBindingRecord | null {
+    const existing = this.getIdentityBinding(chain);
+
+    if (!existing || existing.revokedAt) {
+      return existing;
+    }
+
+    const now = new Date().toISOString();
+
+    this.db
+      .prepare(
+        `
+        UPDATE identity_bindings
+        SET revoked_at = ?, updated_at = ?
+        WHERE chain = ?
+        `
+      )
+      .run(now, now, chain);
+
+    return this.getIdentityBinding(chain);
   }
 
   public createConversation(conversationId: string): void {
@@ -1128,6 +1530,40 @@ export class SQLiteMeshStore {
     };
   }
 
+  private toIdentityChallengeRecord(row: IdentityChallengeRow): IdentityChallengeRecord {
+    return {
+      challengeId: row.challenge_id,
+      chain: row.chain,
+      nodeId: row.node_id,
+      walletAddress: row.wallet_address,
+      cluster: row.cluster,
+      statement: row.statement,
+      nonce: row.nonce,
+      issuedAt: row.issued_at,
+      expiresAt: row.expires_at,
+      usedAt: row.used_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  private toIdentityBindingRecord(row: IdentityBindingRow): IdentityBindingRecord {
+    return {
+      chain: row.chain,
+      nodeId: row.node_id,
+      walletAddress: row.wallet_address,
+      cluster: row.cluster,
+      challengeId: row.challenge_id,
+      proofSignatureB64: row.proof_signature_b64,
+      anchorTxSignature: row.anchor_tx_signature,
+      identityCommitment: row.identity_commitment,
+      boundAt: row.bound_at,
+      revokedAt: row.revoked_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
   private initialize(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS node_identity (
@@ -1235,6 +1671,42 @@ export class SQLiteMeshStore {
 
       CREATE INDEX IF NOT EXISTS idx_network_invites_expires
         ON network_invites(expires_at);
+
+      CREATE TABLE IF NOT EXISTS identity_challenges (
+        challenge_id TEXT PRIMARY KEY,
+        chain TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        wallet_address TEXT NOT NULL,
+        cluster TEXT NOT NULL,
+        statement TEXT NOT NULL,
+        nonce TEXT NOT NULL,
+        issued_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        used_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_identity_challenges_chain_wallet
+        ON identity_challenges(chain, wallet_address);
+
+      CREATE INDEX IF NOT EXISTS idx_identity_challenges_expires
+        ON identity_challenges(expires_at);
+
+      CREATE TABLE IF NOT EXISTS identity_bindings (
+        chain TEXT PRIMARY KEY,
+        node_id TEXT NOT NULL,
+        wallet_address TEXT NOT NULL,
+        cluster TEXT NOT NULL,
+        challenge_id TEXT NOT NULL,
+        proof_signature_b64 TEXT NOT NULL,
+        anchor_tx_signature TEXT,
+        identity_commitment TEXT NOT NULL,
+        bound_at TEXT NOT NULL,
+        revoked_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
 
     this.ensureOptionalColumns();

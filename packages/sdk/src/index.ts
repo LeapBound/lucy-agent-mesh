@@ -113,6 +113,31 @@ export interface IntroductionResult {
   };
 }
 
+export interface IdentityBinding {
+  chain: string;
+  nodeId: string;
+  walletAddress: string;
+  cluster: string;
+  challengeId: string;
+  anchorTxSignature: string | null;
+  identityCommitment: string;
+  boundAt: string;
+  revokedAt: string | null;
+  updatedAt: string;
+}
+
+export interface SolanaIdentityChallenge {
+  chain: "solana";
+  challengeId: string;
+  nodeId: string;
+  walletAddress: string;
+  cluster: string;
+  statement: string;
+  nonce: string;
+  issuedAt: string;
+  expiresAt: string;
+}
+
 export class MeshNodeClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -174,6 +199,42 @@ export class MeshNodeClient {
     bootstrapPeers: string[];
   }> {
     return this.request("POST", "/v1/network/join", { joinToken });
+  }
+
+  public async getIdentityBinding(chain = "solana"): Promise<{
+    binding: IdentityBinding | null;
+  }> {
+    const params = new URLSearchParams({
+      chain
+    });
+
+    return this.request("GET", `/v1/identity/binding?${params.toString()}`);
+  }
+
+  public async createIdentityChallenge(input: {
+    walletAddress: string;
+    cluster?: string;
+    expiresInSeconds?: number;
+  }): Promise<{
+    challenge: SolanaIdentityChallenge;
+  }> {
+    return this.request("POST", "/v1/identity/challenge", input);
+  }
+
+  public async bindIdentity(input: {
+    challengeId: string;
+    signatureBase64: string;
+    anchorTxSignature?: string | null;
+  }): Promise<{
+    binding: IdentityBinding;
+  }> {
+    return this.request("POST", "/v1/identity/bind", input);
+  }
+
+  public async revokeIdentityBinding(chain = "solana"): Promise<{
+    binding: IdentityBinding | null;
+  }> {
+    return this.request("POST", "/v1/identity/revoke", { chain });
   }
 
   public async discoverAgents(input: {

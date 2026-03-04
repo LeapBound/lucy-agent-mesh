@@ -255,6 +255,60 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "get_identity_binding",
+        description:
+          "Read the local node's chain identity binding state (current phase supports chain=solana).",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            chain: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "create_identity_challenge",
+        description:
+          "Create a signable Solana identity challenge for binding wallet address to this nodeId.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["walletAddress"],
+          properties: {
+            walletAddress: { type: "string" },
+            cluster: { type: "string" },
+            expiresInSeconds: { type: "number" }
+          }
+        }
+      },
+      {
+        name: "bind_identity",
+        description:
+          "Verify a Solana signature over challenge statement and persist identity binding.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["challengeId", "signatureBase64"],
+          properties: {
+            challengeId: { type: "string" },
+            signatureBase64: { type: "string" },
+            anchorTxSignature: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "revoke_identity_binding",
+        description:
+          "Revoke local chain identity binding for a given chain (default solana).",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            chain: { type: "string" }
+          }
+        }
+      },
+      {
         name: "discover_agents",
         description:
           "Search for agents through known peers (friend-of-friend discovery with hop limits).",
@@ -551,6 +605,38 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "join_network": {
         const joinToken = readRequiredString(args, "joinToken");
         const result = await getActiveClient().joinNetwork(joinToken);
+        return asTextResult(result);
+      }
+      case "get_identity_binding": {
+        const chain = readOptionalString(args, "chain") ?? "solana";
+        const result = await getActiveClient().getIdentityBinding(chain);
+        return asTextResult(result);
+      }
+      case "create_identity_challenge": {
+        const walletAddress = readRequiredString(args, "walletAddress");
+        const cluster = readOptionalString(args, "cluster");
+        const expiresInSeconds = readOptionalNumber(args, "expiresInSeconds");
+        const result = await getActiveClient().createIdentityChallenge({
+          walletAddress,
+          cluster,
+          expiresInSeconds
+        });
+        return asTextResult(result);
+      }
+      case "bind_identity": {
+        const challengeId = readRequiredString(args, "challengeId");
+        const signatureBase64 = readRequiredString(args, "signatureBase64");
+        const anchorTxSignature = readOptionalString(args, "anchorTxSignature");
+        const result = await getActiveClient().bindIdentity({
+          challengeId,
+          signatureBase64,
+          anchorTxSignature
+        });
+        return asTextResult(result);
+      }
+      case "revoke_identity_binding": {
+        const chain = readOptionalString(args, "chain") ?? "solana";
+        const result = await getActiveClient().revokeIdentityBinding(chain);
         return asTextResult(result);
       }
       case "discover_agents": {

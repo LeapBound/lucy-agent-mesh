@@ -167,3 +167,52 @@
   - `./node_modules/.bin/tsc -p apps/node-daemon/tsconfig.json --noEmit`
   - `./node_modules/.bin/tsc -p packages/sdk/tsconfig.json --noEmit`
   - `python3 /home/fredgu/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/lucy-mesh-operator`
+
+### 2026-03-04（产品定位更新）
+
+- 改动范围：`README.md`、`AGENT.md`
+- 主要内容：
+  - 将项目定位明确为：**基于区块链的 Agents 之间的微信**。
+  - 在 README 新增“产品定位”章节，统一三层叙事：
+    - 体验层（微信式 agent 交互）
+    - 信任层（链上身份与成员关系）
+    - 数据层（链下通信、链上锚点/权限/结算）
+- 验证结果：
+  - README 章节结构与文案已人工复查。
+
+### 2026-03-04（链上身份 Phase 1: Solana 绑定）
+
+- 改动范围：`packages/storage-sqlite/src/index.ts`、`apps/node-daemon/src/*`、`packages/sdk/src/index.ts`、`apps/mcp-server/src/index.ts`、`README.md`、`skills/lucy-mesh-operator/*`
+- 主要内容：
+  - 新增本地身份绑定数据模型（SQLite）：
+    - `identity_challenges`（挑战签名）
+    - `identity_bindings`（绑定状态与承诺）
+  - 新增 Solana 身份工具模块：`apps/node-daemon/src/solana-identity.ts`。
+    - 钱包地址规范化（base58）
+    - 挑战文案生成
+    - Ed25519 签名验证
+    - 身份承诺哈希计算
+  - Node daemon 新增身份 API：
+    - `GET /v1/identity/binding?chain=solana`
+    - `POST /v1/identity/challenge`
+    - `POST /v1/identity/bind`
+    - `POST /v1/identity/revoke`
+  - SDK 新增身份方法：
+    - `getIdentityBinding`
+    - `createIdentityChallenge`
+    - `bindIdentity`
+    - `revokeIdentityBinding`
+  - MCP 新增身份工具：
+    - `get_identity_binding`
+    - `create_identity_challenge`
+    - `bind_identity`
+    - `revoke_identity_binding`
+  - README 新增“链上身份绑定（Phase 1: Solana）”使用示例，并同步 MCP 工具列表。
+  - skill 文档同步增加身份绑定流程与工具映射。
+- 验证结果：
+  - `./node_modules/.bin/tsc -p packages/storage-sqlite/tsconfig.json --noEmit`
+  - `./node_modules/.bin/tsc -p apps/node-daemon/tsconfig.json --noEmit`
+  - `./node_modules/.bin/tsc -p packages/sdk/tsconfig.json --noEmit`
+  - `./node_modules/.bin/tsc -p apps/mcp-server/tsconfig.json --noEmit`
+  - `python3 /home/fredgu/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/lucy-mesh-operator`
+  - 身份 API smoke：`identity challenge -> bind(预期 400) -> binding query`，结果 `IDENTITY API SMOKE PASS`

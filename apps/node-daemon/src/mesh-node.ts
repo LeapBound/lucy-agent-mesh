@@ -13,6 +13,7 @@ import {
 } from "@lucy/core";
 import {
   type AgentContactRecord,
+  type IdentityBindingRecord,
   type NetworkConfigRecord,
   SQLiteMeshStore,
   type PeerDirectoryEntry,
@@ -40,6 +41,15 @@ import {
   verifyP2PRequest,
   type JoinTokenPayload
 } from "./network-auth.js";
+import {
+  computeIdentityCommitment,
+  createSolanaIdentityStatement,
+  normalizeAnchorTxSignature,
+  normalizeIdentityChallengeTtl,
+  normalizeSolanaCluster,
+  normalizeSolanaWalletAddress,
+  verifySolanaIdentitySignature
+} from "./solana-identity.js";
 
 export interface MessageInput {
   conversationId: string;
@@ -112,6 +122,31 @@ export interface NetworkState {
   keyFingerprint: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+}
+
+export interface SolanaIdentityChallenge {
+  chain: "solana";
+  challengeId: string;
+  nodeId: string;
+  walletAddress: string;
+  cluster: string;
+  statement: string;
+  nonce: string;
+  issuedAt: string;
+  expiresAt: string;
+}
+
+export interface IdentityBindingView {
+  chain: string;
+  nodeId: string;
+  walletAddress: string;
+  cluster: string;
+  challengeId: string;
+  anchorTxSignature: string | null;
+  identityCommitment: string;
+  boundAt: string;
+  revokedAt: string | null;
+  updatedAt: string;
 }
 
 export interface InitNetworkInput {
@@ -984,6 +1019,135 @@ export class MeshNode extends EventEmitter {
     return toContactProfile(updated);
   }
 
+  public getIdentityBinding(chain = "solana"): IdentityBindingView | null {
+    const normalizedChain = normalizeIdentityChain(chain);
+    const binding = this.store.getIdentityBinding(normalizedChain);
+
+    if (!binding) {
+      return null;
+    }
+
+    return toIdentityBindingView(binding);
+  }
+
+  public createSolanaIdentityChallenge(input: {
+    walletAddress: string;
+    cluster?: string;
+    expiresInSeconds?: number;
+  }): SolanaIdentityChallenge {
+    const walletAddress = normalizeSolanaWalletAddress(input.walletAddress);
+    const cluster = normalizeSolanaCluster(input.cluster);
+    const expiresInSeconds = normalizeIdentityChallengeTtl(input.expiresInSeconds);
+    const challengeId = randomUUID();
+    const nonce = randomUUID().replace(/-/g, "");
+    const issuedAt = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
+    const statement = createSolanaIdentityStatement({
+      nodeId: this.identity.nodeId,
+      walletAddress,
+      cluster,
+      challengeId,
+      nonce,
+      issuedAt,
+      expiresAt
+    });
+
+    const challenge = this.store.createIdentityChallenge({
+      challengeId,
+      chain: "solana",
+      nodeId: this.identity.nodeId,
+      walletAddress,
+      cluster,
+      statement,
+      nonce,
+      issuedAt,
+      expiresAt
+    });
+
+    return toSolanaIdentityChallenge(challenge);
+  }
+
+  public bindSolanaIdentity(input: {
+    challengeId: string;
+    signatureBase64: string;
+    anchorTxSignature?: string | null;
+  }): IdentityBindingView {
+    const challengeId = input.challengeId.trim();
+
+    if (!challengeId) {
+      throw new Error("challengeId is required");
+    }
+
+    const signatureBase64 = normalizeBase64Signature(input.signatureBase64);
+    const challenge = this.store.getIdentityChallenge(challengeId);
+
+    if (!challenge) {
+      throw new Error("identity challenge not found");
+    }
+
+    if (challenge.chain !== "solana") {
+      throw new Error("identity challenge chain mismatch");
+    }
+
+    if (challenge.nodeId !== this.identity.nodeId) {
+      throw new Error("identity challenge node mismatch");
+    }
+
+    const verified = verifySolanaIdentitySignature({
+      walletAddress: challenge.walletAddress,
+      statement: challenge.statement,
+      signatureBase64
+    });
+
+    if (!verified) {
+      throw new Error("identity signature verification failed");
+    }
+
+    const consumed = this.store.consumeIdentityChallenge({
+      challengeId,
+      chain: challenge.chain,
+      walletAddress: challenge.walletAddress
+    });
+
+    if (!consumed.ok || !consumed.challenge) {
+      throw new Error(consumed.reason ?? "identity challenge consumption failed");
+    }
+
+    const boundAt = new Date().toISOString();
+    const binding = this.store.upsertIdentityBinding({
+      chain: "solana",
+      nodeId: this.identity.nodeId,
+      walletAddress: challenge.walletAddress,
+      cluster: challenge.cluster,
+      challengeId: challenge.challengeId,
+      proofSignatureB64: signatureBase64,
+      anchorTxSignature: normalizeAnchorTxSignature(input.anchorTxSignature ?? undefined),
+      identityCommitment: computeIdentityCommitment({
+        nodeId: this.identity.nodeId,
+        chain: "solana",
+        walletAddress: challenge.walletAddress,
+        cluster: challenge.cluster,
+        challengeId: challenge.challengeId,
+        signatureBase64,
+        boundAt
+      }),
+      boundAt
+    });
+
+    return toIdentityBindingView(binding);
+  }
+
+  public revokeIdentityBinding(chain = "solana"): IdentityBindingView | null {
+    const normalizedChain = normalizeIdentityChain(chain);
+    const revoked = this.store.revokeIdentityBinding(normalizedChain);
+
+    if (!revoked) {
+      return null;
+    }
+
+    return toIdentityBindingView(revoked);
+  }
+
   public buildP2PAuthHeaders(input: {
     method: string;
     path: string;
@@ -1648,6 +1812,34 @@ function normalizeOptionalText(
   return normalized;
 }
 
+function normalizeBase64Signature(raw: string): string {
+  const value = raw.trim();
+
+  if (!value) {
+    throw new Error("signatureBase64 is required");
+  }
+
+  if (value.length > 2048) {
+    throw new Error("signatureBase64 exceeds max length 2048");
+  }
+
+  return value;
+}
+
+function normalizeIdentityChain(raw: string): string {
+  const value = raw.trim().toLowerCase();
+
+  if (!value) {
+    throw new Error("chain is required");
+  }
+
+  if (value !== "solana") {
+    throw new Error("only solana identity binding is supported in current phase");
+  }
+
+  return value;
+}
+
 function toContactProfile(contact: AgentContactRecord): AgentContactProfile {
   return {
     alias: contact.alias,
@@ -1655,6 +1847,44 @@ function toContactProfile(contact: AgentContactRecord): AgentContactProfile {
     capabilities: contact.capabilities,
     notes: contact.notes,
     updatedAt: contact.updatedAt
+  };
+}
+
+function toSolanaIdentityChallenge(input: {
+  challengeId: string;
+  nodeId: string;
+  walletAddress: string;
+  cluster: string;
+  statement: string;
+  nonce: string;
+  issuedAt: string;
+  expiresAt: string;
+}): SolanaIdentityChallenge {
+  return {
+    chain: "solana",
+    challengeId: input.challengeId,
+    nodeId: input.nodeId,
+    walletAddress: input.walletAddress,
+    cluster: input.cluster,
+    statement: input.statement,
+    nonce: input.nonce,
+    issuedAt: input.issuedAt,
+    expiresAt: input.expiresAt
+  };
+}
+
+function toIdentityBindingView(binding: IdentityBindingRecord): IdentityBindingView {
+  return {
+    chain: binding.chain,
+    nodeId: binding.nodeId,
+    walletAddress: binding.walletAddress,
+    cluster: binding.cluster,
+    challengeId: binding.challengeId,
+    anchorTxSignature: binding.anchorTxSignature,
+    identityCommitment: binding.identityCommitment,
+    boundAt: binding.boundAt,
+    revokedAt: binding.revokedAt,
+    updatedAt: binding.updatedAt
   };
 }
 

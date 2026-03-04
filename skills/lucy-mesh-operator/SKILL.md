@@ -14,6 +14,7 @@ Run node-level operations for `lucy-agent-mesh` safely and deterministically.
 3. Use `set_active_node` before any node-level operation (`whoami`, `init_network`, `discover_agents`, `send_direct_message`).
 4. Select an operation path:
    - Bootstrap or join network: read `references/workflow.md` section "MCP-first quickstart".
+   - Bind chain identity: use `create_identity_challenge` -> wallet sign -> `bind_identity`.
    - Find unknown target agent: read `references/workflow.md` section "Social discovery and introduction".
    - Send message safely: read `references/workflow.md` section "Safe direct messaging".
 5. Use HTTP API fallback only when MCP tools are unavailable.

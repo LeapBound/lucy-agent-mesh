@@ -126,6 +126,70 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (method === "GET" && requestUrl.pathname === "/v1/identity/binding") {
+      const chain = requestUrl.searchParams.get("chain") ?? "solana";
+      const binding = meshNode.getIdentityBinding(chain);
+      sendJson(response, 200, { binding });
+      return;
+    }
+
+    if (method === "POST" && requestUrl.pathname === "/v1/identity/challenge") {
+      const body = await readJsonBody<{
+        walletAddress?: string;
+        cluster?: string;
+        expiresInSeconds?: number;
+      }>(request, config.maxBodyBytes);
+
+      if (!body.walletAddress) {
+        sendError(response, 400, "walletAddress is required");
+        return;
+      }
+
+      const challenge = meshNode.createSolanaIdentityChallenge({
+        walletAddress: body.walletAddress,
+        cluster: body.cluster,
+        expiresInSeconds: body.expiresInSeconds
+      });
+
+      sendJson(response, 200, {
+        challenge
+      });
+      return;
+    }
+
+    if (method === "POST" && requestUrl.pathname === "/v1/identity/bind") {
+      const body = await readJsonBody<{
+        challengeId?: string;
+        signatureBase64?: string;
+        anchorTxSignature?: string | null;
+      }>(request, config.maxBodyBytes);
+
+      if (!body.challengeId || !body.signatureBase64) {
+        sendError(response, 400, "challengeId and signatureBase64 are required");
+        return;
+      }
+
+      const binding = meshNode.bindSolanaIdentity({
+        challengeId: body.challengeId,
+        signatureBase64: body.signatureBase64,
+        anchorTxSignature: body.anchorTxSignature
+      });
+
+      sendJson(response, 200, { binding });
+      return;
+    }
+
+    if (method === "POST" && requestUrl.pathname === "/v1/identity/revoke") {
+      const body = await readJsonBody<{
+        chain?: string;
+      }>(request, config.maxBodyBytes);
+
+      const chain = body.chain ?? "solana";
+      const binding = meshNode.revokeIdentityBinding(chain);
+      sendJson(response, 200, { binding });
+      return;
+    }
+
     if (method === "POST" && requestUrl.pathname === "/v1/node/profile") {
       const body = await readJsonBody<{ displayName?: string }>(
         request,
@@ -670,6 +734,12 @@ function isClientInputError(message: string): boolean {
     message.includes("joinToken redemption") ||
     message.includes("Legacy joinToken") ||
     message.includes("Network is not configured") ||
+    message.includes("identity challenge") ||
+    message.includes("identity signature") ||
+    message.includes("walletAddress") ||
+    message.includes("signatureBase64") ||
+    message.includes("chain") ||
+    message.includes("base58") ||
     message.includes("required") ||
     message.includes("must ") ||
     message.includes("mismatch") ||

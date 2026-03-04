@@ -48,6 +48,24 @@ Use this table to map intent to the smallest reliable MCP sequence.
 - MCP: `join_network`
 - HTTP fallback: `POST /v1/network/join`
 
+## Chain identity (phase 1)
+
+- Goal: read current chain identity binding
+- MCP: `get_identity_binding`
+- HTTP fallback: `GET /v1/identity/binding?chain=solana`
+
+- Goal: create signable binding challenge
+- MCP: `create_identity_challenge`
+- HTTP fallback: `POST /v1/identity/challenge`
+
+- Goal: verify signature and persist binding
+- MCP: `bind_identity`
+- HTTP fallback: `POST /v1/identity/bind`
+
+- Goal: revoke chain identity binding
+- MCP: `revoke_identity_binding`
+- HTTP fallback: `POST /v1/identity/revoke`
+
 ## Peer topology
 
 - Goal: list peers

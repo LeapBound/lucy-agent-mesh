@@ -15,6 +15,12 @@ Expected outcome:
 - peers are connected in star topology
 - active node is set to bootstrap (unless explicitly disabled)
 
+Optional identity step (recommended):
+1. `create_identity_challenge`
+2. wallet signs `challenge.statement`
+3. `bind_identity`
+4. `get_identity_binding` confirms wallet <-> nodeId binding
+
 ## 2. Manual node lifecycle (when custom topology is needed)
 
 MCP sequence:
