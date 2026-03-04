@@ -1,49 +1,35 @@
 # Workflow
 
-## 1. Node preflight
+## 1. MCP-first quickstart
 
-Run:
-
-```bash
-NODE_API_URL=http://127.0.0.1:7010 ./skills/lucy-mesh-operator/scripts/preflight-check.sh
-```
-
-Expected:
-- `/healthz` responds
-- `/v1/node` responds
-- `/v1/network` responds (configured or not configured)
-
-If this fails, stop and fix reachability first.
-
-## 2. Network bootstrap and join
-
-### Bootstrap first node
+Use this as the default path in local development.
 
 MCP sequence:
-1. `init_network`
-2. `create_join_token` (optional for additional nodes)
+1. `mesh_quickstart_local`
+2. `get_active_node`
+3. `whoami`
 
-HTTP equivalent:
+Expected outcome:
+- MCP manages 2+ local daemons
+- network is initialized
+- peers are connected in star topology
+- active node is set to bootstrap (unless explicitly disabled)
 
-```bash
-curl -s http://127.0.0.1:7010/v1/network/init \
-  -H "content-type: application/json" \
-  -d {} | jq
-```
-
-### Join another node
+## 2. Manual node lifecycle (when custom topology is needed)
 
 MCP sequence:
-1. `join_network`
-2. `add_peer`
-3. `sync_from_peers`
+1. `daemon_start` (repeat per node)
+2. `daemon_status`
+3. `set_active_node` to bootstrap node
+4. `init_network`
+5. `create_join_token` (`maxUses >= joining nodes`)
+6. `set_active_node` to target node and `join_network`
+7. `add_peer` and `sync_from_peers`
 
-HTTP equivalent:
+HTTP fallback preflight:
 
 ```bash
-curl -s http://127.0.0.1:7011/v1/network/join \
-  -H "content-type: application/json" \
-  -d {joinToken:<JOIN_TOKEN>} | jq
+NODE_API_URL=http://127.0.0.1:7010 ./skills/lucy-mesh-operator/scripts/preflight-check.sh --require-network
 ```
 
 ## 3. Social discovery and introduction
@@ -61,7 +47,7 @@ HTTP equivalent discovery:
 ```bash
 curl -s http://127.0.0.1:7010/v1/discovery/query \
   -H "content-type: application/json" \
-  -d query:test-agent sync | jq
+  -d '{"query":"test-agent sync","maxHops":1,"maxPeerFanout":2,"limit":10}' | jq
 ```
 
 HTTP equivalent intro:
@@ -69,7 +55,7 @@ HTTP equivalent intro:
 ```bash
 curl -s http://127.0.0.1:7010/v1/discovery/intro-request \
   -H "content-type: application/json" \
-  -d introducerPeerUrl:http://127.0.0.1:7011 | jq
+  -d '{"introducerPeerUrl":"http://127.0.0.1:7011","targetNodeId":"<TARGET_NODE_ID>","message":"想沟通同步策略"}' | jq
 ```
 
 ## 4. Safe direct messaging
@@ -87,10 +73,17 @@ HTTP equivalent:
 ```bash
 curl -s http://127.0.0.1:7010/v1/messages/direct \
   -H "content-type: application/json" \
-  -d recipientNodeId:<TARGET_NODE_ID> | jq
+  -d '{"recipientNodeId":"<TARGET_NODE_ID>","content":"hello"}' | jq
 ```
 
-## 5. Post-change refresh
+## 5. Teardown and cleanup
+
+MCP sequence:
+1. `daemon_status`
+2. `daemon_stop` per managed daemon (`daemonId` or `port`)
+3. optional: restart with `daemon_start clearDataDir=true` for fresh state
+
+## 6. Post-change refresh
 
 Run after any network mutation:
 1. `list_agents`

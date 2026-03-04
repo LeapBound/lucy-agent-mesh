@@ -1,3 +1,9 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { createWriteStream, type WriteStream } from "node:fs";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -7,16 +13,55 @@ import {
 
 import { MeshNodeClient } from "@lucy/sdk";
 
-const baseUrl = (process.env.NODE_API_URL ?? "http://127.0.0.1:7010").replace(
-  /\/$/, ""
+type DaemonState = "starting" | "running" | "stopped" | "failed";
+
+interface ManagedDaemonRecord {
+  daemonId: string;
+  nodeName: string;
+  host: string;
+  port: number;
+  nodeApiUrl: string;
+  dataDir: string;
+  logPath: string;
+  state: DaemonState;
+  pid: number | null;
+  startedAt: string;
+  updatedAt: string;
+  lastError: string | null;
+}
+
+interface RuntimeState {
+  activeNodeApiUrl: string;
+  daemons: ManagedDaemonRecord[];
+  updatedAt: string;
+}
+
+interface ManagedProcess {
+  child: ChildProcess;
+  logStream: WriteStream;
+}
+
+const thisFile = fileURLToPath(import.meta.url);
+const thisDir = dirname(thisFile);
+const mcpAppDir = resolve(thisDir, "..");
+const repoRoot = resolve(mcpAppDir, "../..");
+const runtimeDir = resolve(repoRoot, ".local");
+const runtimeStatePath = resolve(runtimeDir, "mcp-runtime.json");
+const nodeDaemonDir = resolve(repoRoot, "apps/node-daemon");
+
+const managedDaemons = new Map<string, ManagedDaemonRecord>();
+const managedProcesses = new Map<string, ManagedProcess>();
+
+let activeNodeApiUrl = normalizeNodeApiUrl(
+  process.env.NODE_API_URL ?? "http://127.0.0.1:7010"
 );
 
-const client = new MeshNodeClient({ baseUrl });
+await loadRuntimeState();
 
 const server = new Server(
   {
     name: "lucy-mesh-mcp",
-    version: "0.1.0"
+    version: "0.2.0"
   },
   {
     capabilities: {
@@ -28,6 +73,107 @@ const server = new Server(
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
+      {
+        name: "get_active_node",
+        description:
+          "Return current active node API URL and MCP-managed daemon registry status.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {}
+        }
+      },
+      {
+        name: "set_active_node",
+        description:
+          "Switch active node API URL used by node-level MCP tools (whoami/send/discovery/etc).",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["nodeApiUrl"],
+          properties: {
+            nodeApiUrl: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "daemon_start",
+        description:
+          "Start one local node-daemon process and register it under MCP management.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["port"],
+          properties: {
+            daemonId: { type: "string" },
+            nodeName: { type: "string" },
+            host: { type: "string" },
+            port: { type: "number" },
+            dataDir: { type: "string" },
+            publicBaseUrl: { type: "string" },
+            peerUrls: {
+              type: "array",
+              items: { type: "string" }
+            },
+            discoveryAutoAcceptIntros: { type: "boolean" },
+            syncIntervalMs: { type: "number" },
+            networkId: { type: "string" },
+            networkKey: { type: "string" },
+            startupTimeoutMs: { type: "number" },
+            clearDataDir: { type: "boolean" },
+            reuseIfRunning: { type: "boolean" }
+          }
+        }
+      },
+      {
+        name: "daemon_stop",
+        description: "Stop one MCP-managed node-daemon process.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            daemonId: { type: "string" },
+            port: { type: "number" },
+            signal: {
+              type: "string",
+              enum: ["SIGTERM", "SIGINT", "SIGKILL"]
+            },
+            timeoutMs: { type: "number" }
+          }
+        }
+      },
+      {
+        name: "daemon_status",
+        description:
+          "Inspect MCP-managed daemons with optional health probing and filtering.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            daemonId: { type: "string" },
+            port: { type: "number" },
+            includeHealth: { type: "boolean" }
+          }
+        }
+      },
+      {
+        name: "mesh_quickstart_local",
+        description:
+          "One-call local mesh bootstrap via MCP: start N daemons, init network, join peers, connect topology, and sync.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            startPort: { type: "number" },
+            nodeCount: { type: "number" },
+            nodeNamePrefix: { type: "string" },
+            joinTokenMaxUses: { type: "number" },
+            startupTimeoutMs: { type: "number" },
+            clearExisting: { type: "boolean" },
+            setActiveToBootstrap: { type: "boolean" }
+          }
+        }
+      },
       {
         name: "whoami",
         description: "Return current local mesh node identity and known peers.",
@@ -282,17 +428,89 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     switch (request.params.name) {
+      case "get_active_node": {
+        const result = await getActiveNodeStatus();
+        return asTextResult(result);
+      }
+      case "set_active_node": {
+        const nodeApiUrl = normalizeNodeApiUrl(readRequiredString(args, "nodeApiUrl"));
+        const health = await checkNodeHealth(nodeApiUrl);
+        activeNodeApiUrl = nodeApiUrl;
+        await saveRuntimeState();
+
+        return asTextResult({
+          activeNodeApiUrl,
+          reachable: health,
+          message: health
+            ? "Active node switched"
+            : "Active node switched, but /healthz is currently unreachable"
+        });
+      }
+      case "daemon_start": {
+        const result = await startManagedDaemon({
+          daemonId: readOptionalString(args, "daemonId"),
+          nodeName: readOptionalString(args, "nodeName"),
+          host: readOptionalString(args, "host"),
+          port: readRequiredPort(args, "port"),
+          dataDir: readOptionalString(args, "dataDir"),
+          publicBaseUrl: readOptionalString(args, "publicBaseUrl"),
+          peerUrls: readOptionalStringArray(args, "peerUrls"),
+          discoveryAutoAcceptIntros: readOptionalBoolean(
+            args,
+            "discoveryAutoAcceptIntros"
+          ),
+          syncIntervalMs: readOptionalInteger(args, "syncIntervalMs"),
+          networkId: readOptionalString(args, "networkId"),
+          networkKey: readOptionalString(args, "networkKey"),
+          startupTimeoutMs: readOptionalInteger(args, "startupTimeoutMs"),
+          clearDataDir: readOptionalBoolean(args, "clearDataDir"),
+          reuseIfRunning: readOptionalBoolean(args, "reuseIfRunning")
+        });
+
+        return asTextResult(result);
+      }
+      case "daemon_stop": {
+        const result = await stopManagedDaemon({
+          daemonId: readOptionalString(args, "daemonId"),
+          port: readOptionalPort(args, "port"),
+          signal: readOptionalString(args, "signal") as NodeJS.Signals | undefined,
+          timeoutMs: readOptionalInteger(args, "timeoutMs")
+        });
+
+        return asTextResult(result);
+      }
+      case "daemon_status": {
+        const daemonId = readOptionalString(args, "daemonId");
+        const port = readOptionalPort(args, "port");
+        const includeHealth = readOptionalBoolean(args, "includeHealth") ?? true;
+        const result = await listManagedDaemons({ daemonId, port, includeHealth });
+
+        return asTextResult(result);
+      }
+      case "mesh_quickstart_local": {
+        const result = await quickstartLocalMesh({
+          startPort: readOptionalPort(args, "startPort"),
+          nodeCount: readOptionalInteger(args, "nodeCount"),
+          nodeNamePrefix: readOptionalString(args, "nodeNamePrefix"),
+          joinTokenMaxUses: readOptionalInteger(args, "joinTokenMaxUses"),
+          startupTimeoutMs: readOptionalInteger(args, "startupTimeoutMs"),
+          clearExisting: readOptionalBoolean(args, "clearExisting"),
+          setActiveToBootstrap: readOptionalBoolean(args, "setActiveToBootstrap")
+        });
+
+        return asTextResult(result);
+      }
       case "whoami": {
-        const result = await client.whoAmI();
+        const result = await getActiveClient().whoAmI();
         return asTextResult(result);
       }
       case "set_display_name": {
         const displayName = readRequiredString(args, "displayName");
-        const result = await client.setDisplayName(displayName);
+        const result = await getActiveClient().setDisplayName(displayName);
         return asTextResult(result);
       }
       case "get_network": {
-        const result = await client.getNetwork();
+        const result = await getActiveClient().getNetwork();
         return asTextResult(result);
       }
       case "init_network": {
@@ -306,7 +524,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const joinTokenMaxUses = readOptionalNumber(args, "joinTokenMaxUses");
         const joinTokenIssuerUrl = readOptionalString(args, "joinTokenIssuerUrl");
 
-        const result = await client.initNetwork({
+        const result = await getActiveClient().initNetwork({
           networkId,
           networkKey,
           bootstrapPeers,
@@ -322,7 +540,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const maxUses = readOptionalNumber(args, "maxUses");
         const issuerUrl = readOptionalString(args, "issuerUrl");
         const bootstrapPeers = readOptionalStringArray(args, "bootstrapPeers");
-        const result = await client.createJoinToken({
+        const result = await getActiveClient().createJoinToken({
           expiresInSeconds,
           maxUses,
           issuerUrl,
@@ -332,7 +550,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       case "join_network": {
         const joinToken = readRequiredString(args, "joinToken");
-        const result = await client.joinNetwork(joinToken);
+        const result = await getActiveClient().joinNetwork(joinToken);
         return asTextResult(result);
       }
       case "discover_agents": {
@@ -342,7 +560,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const limit = readOptionalNumber(args, "limit");
         const includeSelf = readOptionalBoolean(args, "includeSelf");
 
-        const result = await client.discoverAgents({
+        const result = await getActiveClient().discoverAgents({
           query,
           maxHops,
           maxPeerFanout,
@@ -357,7 +575,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const targetNodeId = readRequiredString(args, "targetNodeId");
         const message = readOptionalString(args, "message");
 
-        const result = await client.requestIntroduction({
+        const result = await getActiveClient().requestIntroduction({
           introducerPeerUrl,
           targetNodeId,
           message
@@ -366,11 +584,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return asTextResult(result);
       }
       case "list_agents": {
-        const result = await client.listAgents();
+        const result = await getActiveClient().listAgents();
         return asTextResult(result);
       }
       case "list_contacts": {
-        const result = await client.listContacts();
+        const result = await getActiveClient().listContacts();
         return asTextResult(result);
       }
       case "upsert_contact": {
@@ -380,7 +598,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const capabilities = readOptionalString(args, "capabilities");
         const notes = readOptionalString(args, "notes");
 
-        const result = await client.upsertContact({
+        const result = await getActiveClient().upsertContact({
           nodeId,
           alias,
           role,
@@ -392,7 +610,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       case "create_conversation": {
         const conversationId = readOptionalString(args, "conversationId");
-        const result = await client.createConversation(conversationId);
+        const result = await getActiveClient().createConversation(conversationId);
         return asTextResult(result);
       }
       case "send_message": {
@@ -400,7 +618,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const content = readRequiredString(args, "content");
         const clientMsgId = readOptionalString(args, "clientMsgId");
 
-        const result = await client.sendMessage({
+        const result = await getActiveClient().sendMessage({
           conversationId,
           content,
           clientMsgId
@@ -413,7 +631,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const content = readRequiredString(args, "content");
         const clientMsgId = readOptionalString(args, "clientMsgId");
 
-        const result = await client.sendDirectMessage({
+        const result = await getActiveClient().sendDirectMessage({
           recipientNodeId,
           content,
           clientMsgId
@@ -432,7 +650,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const clientMsgId = readOptionalString(args, "clientMsgId");
 
-        const result = await client.sendAck({
+        const result = await getActiveClient().sendAck({
           conversationId,
           messageId,
           state,
@@ -446,17 +664,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const after = readOptionalNumber(args, "after") ?? 0;
         const limit = readOptionalNumber(args, "limit") ?? 200;
 
-        const result = await client.listEvents(conversationId, after, limit);
+        const result = await getActiveClient().listEvents(conversationId, after, limit);
         return asTextResult(result);
       }
       case "add_peer": {
         const url = readRequiredString(args, "url");
-        const result = await client.addPeer(url);
+        const result = await getActiveClient().addPeer(url);
         return asTextResult(result);
       }
       case "sync_from_peers": {
         const conversationId = readOptionalString(args, "conversationId");
-        const result = await client.syncFromPeers(conversationId);
+        const result = await getActiveClient().syncFromPeers(conversationId);
         return asTextResult(result);
       }
       default:
@@ -479,6 +697,616 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+function getActiveClient(): MeshNodeClient {
+  return new MeshNodeClient({ baseUrl: activeNodeApiUrl });
+}
+
+async function getActiveNodeStatus(): Promise<{
+  activeNodeApiUrl: string;
+  reachable: boolean;
+  managedDaemons: ManagedDaemonRecord[];
+}> {
+  return {
+    activeNodeApiUrl,
+    reachable: await checkNodeHealth(activeNodeApiUrl),
+    managedDaemons: [...managedDaemons.values()].sort((left, right) =>
+      left.port - right.port
+    )
+  };
+}
+
+async function startManagedDaemon(input: {
+  daemonId?: string;
+  nodeName?: string;
+  host?: string;
+  port: number;
+  dataDir?: string;
+  publicBaseUrl?: string;
+  peerUrls?: string[];
+  discoveryAutoAcceptIntros?: boolean;
+  syncIntervalMs?: number;
+  networkId?: string;
+  networkKey?: string;
+  startupTimeoutMs?: number;
+  clearDataDir?: boolean;
+  reuseIfRunning?: boolean;
+}): Promise<{ daemon: ManagedDaemonRecord; reused: boolean }> {
+  const host = (input.host ?? "127.0.0.1").trim() || "127.0.0.1";
+  const port = normalizePort(input.port);
+  const daemonId = (input.daemonId?.trim() || `node-${port}`).toLowerCase();
+  const nodeName = input.nodeName?.trim() || daemonId;
+  const dataDir =
+    input.dataDir?.trim() || resolve(runtimeDir, `managed-node-${port}`);
+  const logPath = resolve(runtimeDir, `${daemonId}.log`);
+  const nodeApiUrl = normalizeNodeApiUrl(`http://${host}:${port}`);
+  const startupTimeoutMs = input.startupTimeoutMs ?? 15_000;
+  const clearDataDir = input.clearDataDir ?? false;
+  const reuseIfRunning = input.reuseIfRunning ?? true;
+
+  const runningOnPort = findRunningDaemonByPort(port, daemonId);
+
+  if (runningOnPort) {
+    throw new Error(
+      `Port ${port} is already used by managed daemon '${runningOnPort.daemonId}'`
+    );
+  }
+
+  const existing = managedDaemons.get(daemonId);
+  const existingProcess = managedProcesses.get(daemonId);
+
+  if (existing && existingProcess && isProcessRunning(existingProcess.child)) {
+    if (!reuseIfRunning) {
+      throw new Error(
+        `Managed daemon '${daemonId}' is already running (pid ${existingProcess.child.pid ?? "unknown"})`
+      );
+    }
+
+    return {
+      daemon: existing,
+      reused: true
+    };
+  }
+
+  if (clearDataDir) {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+
+  await mkdir(runtimeDir, { recursive: true });
+  await mkdir(dataDir, { recursive: true });
+
+  const logStream = createWriteStream(logPath, { flags: "a" });
+  const child = spawn(process.execPath, ["--import", "tsx", "src/index.ts"], {
+    cwd: nodeDaemonDir,
+    env: {
+      ...process.env,
+      NODE_HOST: host,
+      NODE_PORT: String(port),
+      NODE_NAME: nodeName,
+      DATA_DIR: dataDir,
+      ...(input.publicBaseUrl ? { PUBLIC_BASE_URL: input.publicBaseUrl } : {}),
+      ...(input.peerUrls && input.peerUrls.length > 0
+        ? { PEER_URLS: input.peerUrls.join(",") }
+        : {}),
+      ...(input.discoveryAutoAcceptIntros !== undefined
+        ? {
+            DISCOVERY_AUTO_ACCEPT_INTROS: String(
+              input.discoveryAutoAcceptIntros
+            )
+          }
+        : {}),
+      ...(input.syncIntervalMs !== undefined
+        ? { SYNC_INTERVAL_MS: String(input.syncIntervalMs) }
+        : {}),
+      ...(input.networkId ? { NETWORK_ID: input.networkId } : {}),
+      ...(input.networkKey ? { NETWORK_KEY: input.networkKey } : {})
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  child.stdout?.pipe(logStream, { end: false });
+  child.stderr?.pipe(logStream, { end: false });
+
+  const now = nowIso();
+  const record: ManagedDaemonRecord = {
+    daemonId,
+    nodeName,
+    host,
+    port,
+    nodeApiUrl,
+    dataDir,
+    logPath,
+    state: "starting",
+    pid: child.pid ?? null,
+    startedAt: now,
+    updatedAt: now,
+    lastError: null
+  };
+
+  managedDaemons.set(daemonId, record);
+  managedProcesses.set(daemonId, {
+    child,
+    logStream
+  });
+
+  child.once("exit", (code, signal) => {
+    const managed = managedDaemons.get(daemonId);
+
+    if (managed) {
+      managed.pid = null;
+      managed.updatedAt = nowIso();
+
+      if (signal === "SIGTERM" || signal === "SIGINT" || signal === "SIGKILL") {
+        managed.state = "stopped";
+        managed.lastError = null;
+      } else if (code === 0) {
+        managed.state = "stopped";
+        managed.lastError = null;
+      } else {
+        managed.state = "failed";
+        managed.lastError = `node-daemon exited with code ${code ?? "unknown"}`;
+      }
+    }
+
+    const proc = managedProcesses.get(daemonId);
+    if (proc) {
+      proc.logStream.end();
+      managedProcesses.delete(daemonId);
+    }
+
+    void saveRuntimeState();
+  });
+
+  child.once("error", (error) => {
+    const managed = managedDaemons.get(daemonId);
+    if (managed) {
+      managed.state = "failed";
+      managed.lastError = error.message;
+      managed.pid = null;
+      managed.updatedAt = nowIso();
+    }
+
+    void saveRuntimeState();
+  });
+
+  const healthy = await waitForNodeHealthy(nodeApiUrl, startupTimeoutMs);
+
+  if (!healthy) {
+    if (isProcessRunning(child)) {
+      child.kill("SIGTERM");
+      await waitForProcessExit(child, 2_000);
+    }
+
+    record.state = "failed";
+    record.lastError = `Node did not become healthy within ${startupTimeoutMs}ms`;
+    record.pid = null;
+    record.updatedAt = nowIso();
+    await saveRuntimeState();
+
+    throw new Error(record.lastError);
+  }
+
+  record.state = "running";
+  record.updatedAt = nowIso();
+  record.lastError = null;
+  await saveRuntimeState();
+
+  return {
+    daemon: record,
+    reused: false
+  };
+}
+
+async function stopManagedDaemon(input: {
+  daemonId?: string;
+  port?: number;
+  signal?: NodeJS.Signals;
+  timeoutMs?: number;
+}): Promise<{
+  daemon: ManagedDaemonRecord;
+  stopped: boolean;
+  message: string;
+}> {
+  const signal = normalizeStopSignal(input.signal ?? "SIGTERM");
+  const timeoutMs = input.timeoutMs ?? 5_000;
+  const daemon = resolveDaemon(input.daemonId, input.port);
+
+  if (!daemon) {
+    throw new Error("Managed daemon not found. Provide daemonId or port.");
+  }
+
+  const managedProcess = managedProcesses.get(daemon.daemonId);
+
+  if (!managedProcess || !isProcessRunning(managedProcess.child)) {
+    daemon.state = "stopped";
+    daemon.pid = null;
+    daemon.updatedAt = nowIso();
+    daemon.lastError = null;
+    await saveRuntimeState();
+
+    return {
+      daemon,
+      stopped: true,
+      message: "Daemon was not running"
+    };
+  }
+
+  managedProcess.child.kill(signal);
+  let exited = await waitForProcessExit(managedProcess.child, timeoutMs);
+
+  if (!exited) {
+    managedProcess.child.kill("SIGKILL");
+    exited = await waitForProcessExit(managedProcess.child, 2_000);
+  }
+
+  if (!exited) {
+    daemon.state = "failed";
+    daemon.updatedAt = nowIso();
+    daemon.lastError = "Failed to stop daemon process";
+    await saveRuntimeState();
+
+    throw new Error(daemon.lastError);
+  }
+
+  daemon.state = "stopped";
+  daemon.pid = null;
+  daemon.updatedAt = nowIso();
+  daemon.lastError = null;
+  await saveRuntimeState();
+
+  return {
+    daemon,
+    stopped: true,
+    message: "Daemon stopped"
+  };
+}
+
+async function listManagedDaemons(input?: {
+  daemonId?: string;
+  port?: number;
+  includeHealth?: boolean;
+}): Promise<{
+  activeNodeApiUrl: string;
+  count: number;
+  daemons: Array<ManagedDaemonRecord & { healthy?: boolean }>;
+}> {
+  const includeHealth = input?.includeHealth ?? true;
+  const daemons = [...managedDaemons.values()]
+    .filter((daemon) => {
+      if (input?.daemonId && daemon.daemonId !== input.daemonId) {
+        return false;
+      }
+
+      if (input?.port !== undefined && daemon.port !== input.port) {
+        return false;
+      }
+
+      return true;
+    })
+    .sort((left, right) => left.port - right.port);
+
+  const enriched = await Promise.all(
+    daemons.map(async (daemon) => {
+      if (!includeHealth) {
+        return daemon;
+      }
+
+      return {
+        ...daemon,
+        healthy: await checkNodeHealth(daemon.nodeApiUrl)
+      };
+    })
+  );
+
+  return {
+    activeNodeApiUrl,
+    count: enriched.length,
+    daemons: enriched
+  };
+}
+
+async function quickstartLocalMesh(input: {
+  startPort?: number;
+  nodeCount?: number;
+  nodeNamePrefix?: string;
+  joinTokenMaxUses?: number;
+  startupTimeoutMs?: number;
+  clearExisting?: boolean;
+  setActiveToBootstrap?: boolean;
+}): Promise<{
+  networkId: string;
+  joinTokenPayload: unknown;
+  activeNodeApiUrl: string;
+  nodes: Array<{
+    daemonId: string;
+    nodeApiUrl: string;
+    nodeId: string;
+    displayName: string | null;
+    peers: Array<{ url: string; createdAt: string; lastSyncAt: string | null }>;
+  }>;
+}> {
+  const startPort = normalizePort(input.startPort ?? 7210);
+  const nodeCount = normalizeNodeCount(input.nodeCount ?? 3);
+  const nodeNamePrefix = input.nodeNamePrefix?.trim() || "agent";
+  const joinTokenMaxUses = Math.max(
+    input.joinTokenMaxUses ?? nodeCount + 2,
+    nodeCount
+  );
+  const startupTimeoutMs = input.startupTimeoutMs ?? 15_000;
+  const clearExisting = input.clearExisting ?? true;
+  const setActiveToBootstrap = input.setActiveToBootstrap ?? true;
+
+  const startedDaemons: ManagedDaemonRecord[] = [];
+
+  for (let index = 0; index < nodeCount; index += 1) {
+    const port = startPort + index;
+    const daemonId = `quickstart-${port}`;
+
+    if (clearExisting) {
+      const existing = managedDaemons.get(daemonId);
+      if (existing) {
+        await stopManagedDaemon({ daemonId, signal: "SIGTERM", timeoutMs: 3_000 }).catch(
+          () => undefined
+        );
+      }
+    }
+
+    const started = await startManagedDaemon({
+      daemonId,
+      nodeName: `${nodeNamePrefix}-${index + 1}`,
+      port,
+      startupTimeoutMs,
+      clearDataDir: clearExisting,
+      reuseIfRunning: !clearExisting
+    });
+
+    startedDaemons.push(started.daemon);
+  }
+
+  const bootstrap = startedDaemons[0];
+  const bootstrapClient = new MeshNodeClient({ baseUrl: bootstrap.nodeApiUrl });
+
+  const initResult = await bootstrapClient.initNetwork({
+    bootstrapPeers: [bootstrap.nodeApiUrl],
+    joinTokenMaxUses
+  });
+
+  for (const daemon of startedDaemons.slice(1)) {
+    const client = new MeshNodeClient({ baseUrl: daemon.nodeApiUrl });
+    await client.joinNetwork(initResult.joinToken);
+  }
+
+  for (const daemon of startedDaemons.slice(1)) {
+    const client = new MeshNodeClient({ baseUrl: daemon.nodeApiUrl });
+    await bootstrapClient.addPeer(daemon.nodeApiUrl);
+    await client.addPeer(bootstrap.nodeApiUrl);
+  }
+
+  for (const daemon of startedDaemons) {
+    const client = new MeshNodeClient({ baseUrl: daemon.nodeApiUrl });
+    await client.syncFromPeers();
+  }
+
+  const nodeSummaries = await Promise.all(
+    startedDaemons.map(async (daemon) => {
+      const client = new MeshNodeClient({ baseUrl: daemon.nodeApiUrl });
+      const who = await client.whoAmI();
+
+      return {
+        daemonId: daemon.daemonId,
+        nodeApiUrl: daemon.nodeApiUrl,
+        nodeId: who.nodeId,
+        displayName: who.displayName,
+        peers: who.peers
+      };
+    })
+  );
+
+  if (setActiveToBootstrap) {
+    activeNodeApiUrl = bootstrap.nodeApiUrl;
+  }
+
+  await saveRuntimeState();
+
+  return {
+    networkId: initResult.network.networkId ?? "unknown",
+    joinTokenPayload: initResult.joinTokenPayload,
+    activeNodeApiUrl,
+    nodes: nodeSummaries
+  };
+}
+
+function resolveDaemon(
+  daemonId?: string,
+  port?: number
+): ManagedDaemonRecord | undefined {
+  if (daemonId && daemonId.trim()) {
+    return managedDaemons.get(daemonId.trim().toLowerCase());
+  }
+
+  if (port !== undefined) {
+    return [...managedDaemons.values()].find((daemon) => daemon.port === port);
+  }
+
+  return undefined;
+}
+
+function findRunningDaemonByPort(
+  port: number,
+  excludeDaemonId?: string
+): ManagedDaemonRecord | undefined {
+  for (const daemon of managedDaemons.values()) {
+    if (daemon.port !== port) {
+      continue;
+    }
+
+    if (excludeDaemonId && daemon.daemonId === excludeDaemonId) {
+      continue;
+    }
+
+    const processRef = managedProcesses.get(daemon.daemonId);
+    if (processRef && isProcessRunning(processRef.child)) {
+      return daemon;
+    }
+  }
+
+  return undefined;
+}
+
+function isProcessRunning(child: ChildProcess): boolean {
+  return child.exitCode === null && child.killed === false;
+}
+
+async function waitForProcessExit(
+  child: ChildProcess,
+  timeoutMs: number
+): Promise<boolean> {
+  if (child.exitCode !== null) {
+    return true;
+  }
+
+  return new Promise((resolveWait) => {
+    const timer = setTimeout(() => {
+      child.off("exit", onExit);
+      resolveWait(false);
+    }, timeoutMs);
+
+    const onExit = () => {
+      clearTimeout(timer);
+      resolveWait(true);
+    };
+
+    child.once("exit", onExit);
+  });
+}
+
+async function waitForNodeHealthy(
+  nodeApiUrl: string,
+  timeoutMs: number
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (await checkNodeHealth(nodeApiUrl)) {
+      return true;
+    }
+
+    await sleep(250);
+  }
+
+  return false;
+}
+
+async function checkNodeHealth(nodeApiUrl: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1200);
+
+  try {
+    const response = await fetch(`${nodeApiUrl}/healthz`, {
+      signal: controller.signal
+    });
+
+    return response.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function loadRuntimeState(): Promise<void> {
+  await mkdir(runtimeDir, { recursive: true });
+
+  let parsed: RuntimeState | null = null;
+
+  try {
+    const raw = await readFile(runtimeStatePath, "utf8");
+    parsed = JSON.parse(raw) as RuntimeState;
+  } catch {
+    parsed = null;
+  }
+
+  if (parsed?.activeNodeApiUrl && !process.env.NODE_API_URL) {
+    activeNodeApiUrl = normalizeNodeApiUrl(parsed.activeNodeApiUrl);
+  }
+
+  for (const daemon of parsed?.daemons ?? []) {
+    managedDaemons.set(daemon.daemonId, {
+      ...daemon,
+      state: "stopped",
+      pid: null,
+      updatedAt: nowIso(),
+      lastError:
+        daemon.lastError ??
+        "MCP process restarted; previous daemon ownership is not attached"
+    });
+  }
+
+  await saveRuntimeState();
+}
+
+async function saveRuntimeState(): Promise<void> {
+  const snapshot: RuntimeState = {
+    activeNodeApiUrl,
+    daemons: [...managedDaemons.values()].sort((left, right) =>
+      left.port - right.port
+    ),
+    updatedAt: nowIso()
+  };
+
+  await mkdir(runtimeDir, { recursive: true });
+  await writeFile(runtimeStatePath, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
+}
+
+function normalizeNodeApiUrl(input: string): string {
+  return input.trim().replace(/\/$/, "");
+}
+
+function normalizePort(input: number): number {
+  if (!Number.isFinite(input)) {
+    throw new Error("port must be a finite number");
+  }
+
+  const port = Math.floor(input);
+
+  if (port < 1 || port > 65535) {
+    throw new Error("port must be between 1 and 65535");
+  }
+
+  return port;
+}
+
+function normalizeNodeCount(input: number): number {
+  if (!Number.isFinite(input)) {
+    throw new Error("nodeCount must be a finite number");
+  }
+
+  const nodeCount = Math.floor(input);
+
+  if (nodeCount < 2 || nodeCount > 9) {
+    throw new Error("nodeCount must be between 2 and 9");
+  }
+
+  return nodeCount;
+}
+
+function normalizeStopSignal(input: NodeJS.Signals): NodeJS.Signals {
+  if (input === "SIGTERM" || input === "SIGINT" || input === "SIGKILL") {
+    return input;
+  }
+
+  throw new Error("signal must be one of: SIGTERM, SIGINT, SIGKILL");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolveSleep) => {
+    setTimeout(resolveSleep, ms);
+  });
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
 
 function asTextResult(value: unknown): {
   content: Array<{ type: "text"; text: string }>;
@@ -543,6 +1371,42 @@ function readOptionalNumber(
   }
 
   return value;
+}
+
+function readOptionalInteger(
+  record: Record<string, unknown>,
+  key: string
+): number | undefined {
+  const value = readOptionalNumber(record, key);
+
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return Math.floor(value);
+}
+
+function readRequiredPort(record: Record<string, unknown>, key: string): number {
+  const value = readOptionalNumber(record, key);
+
+  if (value === undefined) {
+    throw new Error(`${key} is required`);
+  }
+
+  return normalizePort(value);
+}
+
+function readOptionalPort(
+  record: Record<string, unknown>,
+  key: string
+): number | undefined {
+  const value = readOptionalNumber(record, key);
+
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return normalizePort(value);
 }
 
 function readOptionalBoolean(

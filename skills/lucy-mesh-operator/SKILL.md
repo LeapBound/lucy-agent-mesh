@@ -1,6 +1,6 @@
 ---
 name: lucy-mesh-operator
-description: Operate a decentralized local-first lucy-agent-mesh network through MCP or HTTP APIs. Use when Codex needs to bootstrap or join a mesh network, manage peers and contacts, discover agents through friend-of-friend search, request introductions, route direct messages by recipient node ID, or troubleshoot sync/auth issues in node-daemon based deployments.
+description: Operate a decentralized local-first lucy-agent-mesh network in MCP-first mode. Use when Codex needs to start or stop local node-daemon processes, quickstart a multi-node mesh, switch active node context, bootstrap or join network, discover agents through friend-of-friend search, request introductions, route direct messages by recipient node ID, or troubleshoot sync/auth issues.
 ---
 
 # Lucy Mesh Operator
@@ -9,15 +9,16 @@ Run node-level operations for `lucy-agent-mesh` safely and deterministically.
 
 ## Workflow
 
-1. Run `scripts/preflight-check.sh` to confirm the local node is reachable before making state changes.
-2. Select an operation path:
-   - Bootstrap or join network: read `references/workflow.md` section "Network bootstrap and join".
+1. Prefer MCP control-plane tools first (`daemon_*`, `mesh_quickstart_local`).
+2. Use `mesh_quickstart_local` for local bootstrap unless user explicitly needs manual topology.
+3. Use `set_active_node` before any node-level operation (`whoami`, `init_network`, `discover_agents`, `send_direct_message`).
+4. Select an operation path:
+   - Bootstrap or join network: read `references/workflow.md` section "MCP-first quickstart".
    - Find unknown target agent: read `references/workflow.md` section "Social discovery and introduction".
    - Send message safely: read `references/workflow.md` section "Safe direct messaging".
-3. Prefer MCP tools first; use HTTP API fallback only when MCP is unavailable.
-   - MCP mapping is in `references/tool-playbook.md`.
-4. On errors, apply the exact recovery recipe from `references/error-recovery.md`.
-5. After any topology change (join, connect, intro accepted), refresh local knowledge:
+5. Use HTTP API fallback only when MCP tools are unavailable.
+6. On errors, apply the exact recovery recipe from `references/error-recovery.md`.
+7. After any topology change (join, connect, intro accepted), refresh local knowledge:
    - `list_agents`
    - `list_contacts`
    - `sync_from_peers`
@@ -27,6 +28,9 @@ Run node-level operations for `lucy-agent-mesh` safely and deterministically.
 - Validate recipient identity before direct messaging.
   - Always resolve `recipientNodeId` from `list_agents`.
   - Avoid using display name as message target.
+- Keep MCP active context explicit.
+  - Run `get_active_node` before mutating state.
+  - Switch with `set_active_node` when moving between nodes.
 - Keep discovery bounded to avoid gossip storms.
   - Start with `maxHops=1` and `maxPeerFanout=2`.
   - Increase one parameter at a time only when needed.

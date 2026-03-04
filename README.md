@@ -229,15 +229,24 @@ curl -s http://127.0.0.1:7010/v1/discovery/intro-request \
 
 ### MCP（stdio）
 
-先确保本地节点已启动，再启动 MCP 进程：
+先启动 MCP 进程：
 
 ```bash
 NODE_API_URL=http://127.0.0.1:7010 pnpm dev:mcp
 ```
 
 当前 MCP 是 **stdio transport**（不是 HTTP server 形式）。
+从 `0.2.0` 起，推荐 **MCP-first** 使用：让 Agent 通过 MCP 工具直接管理本地 node-daemon 进程和组网流程，而不是手动开多个终端。
 
 可用 MCP tools：
+- 运行控制面（MCP-first）：
+  - `get_active_node`
+  - `set_active_node`
+  - `daemon_start`
+  - `daemon_stop`
+  - `daemon_status`
+  - `mesh_quickstart_local`
+- 节点业务面：
 - `whoami`
 - `set_display_name`
 - `get_network`
@@ -256,6 +265,11 @@ NODE_API_URL=http://127.0.0.1:7010 pnpm dev:mcp
 - `list_events`
 - `add_peer`
 - `sync_from_peers`
+
+MCP-first 的最短路径：
+1. 调用 `mesh_quickstart_local`（一次拉起多节点并完成入网/互联/初次同步）
+2. 调用 `get_active_node` + `whoami` 验证当前上下文
+3. 调用 `discover_agents` / `request_introduction` / `send_direct_message` 执行业务
 
 ### Skill（推荐，给 Agent 固化操作经验）
 

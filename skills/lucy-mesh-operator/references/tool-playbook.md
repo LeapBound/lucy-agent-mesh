@@ -2,6 +2,26 @@
 
 Use this table to map intent to the smallest reliable MCP sequence.
 
+## MCP control plane (preferred)
+
+- Goal: inspect active node context and managed runtime
+- MCP: `get_active_node`
+
+- Goal: switch active node context for node-level tools
+- MCP: `set_active_node`
+
+- Goal: start one local node-daemon under MCP
+- MCP: `daemon_start`
+
+- Goal: stop one managed daemon
+- MCP: `daemon_stop`
+
+- Goal: inspect managed daemons and health
+- MCP: `daemon_status`
+
+- Goal: one-call local bootstrap (start N nodes + init/join/connect/sync)
+- MCP: `mesh_quickstart_local`
+
 ## Bootstrap and identity
 
 - Goal: inspect local node identity and peers
@@ -86,7 +106,8 @@ Use this table to map intent to the smallest reliable MCP sequence.
 
 ## Selection rules
 
-- Prefer MCP when tool exists and node daemon is reachable.
-- Use HTTP fallback for debugging, scripted ops, or cross-node automation.
+- Prefer MCP control-plane tools for runtime and topology management.
+- Keep active context explicit: run `get_active_node` before mutating state.
+- Use HTTP fallback for debugging, scripted ops, or non-MCP environments.
 - Never send direct message without a verified `recipientNodeId`.
 - Keep discovery queries bounded (`maxHops <= 2`, `maxPeerFanout <= 5`).

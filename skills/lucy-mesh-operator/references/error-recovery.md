@@ -1,5 +1,28 @@
 # Error Recovery
 
+## MCP control plane failures
+
+### `Node did not become healthy within ...`
+
+Cause:
+- `daemon_start` launched process but `healthz` not ready in timeout.
+
+Recover:
+1. Call `daemon_status` with `includeHealth=true`.
+2. Check daemon log file path from status output.
+3. Retry `daemon_start` with larger `startupTimeoutMs`.
+4. If state contamination is suspected, set `clearDataDir=true`.
+
+### `Port ... is already used by managed daemon ...`
+
+Cause:
+- Same port reused by another running managed daemon.
+
+Recover:
+1. Call `daemon_status`.
+2. Stop conflicting daemon via `daemon_stop`.
+3. Retry `daemon_start` on free port.
+
 ## 400 Bad Request
 
 ### `joinToken is required`

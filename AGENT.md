@@ -145,3 +145,25 @@
   - `python3 /home/fredgu/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/lucy-mesh-operator`
   - `bash -n skills/lucy-mesh-operator/scripts/preflight-check.sh`
   - `NODE_API_URL=http://127.0.0.1:9 skills/lucy-mesh-operator/scripts/preflight-check.sh`（预期失败，验证异常路径）
+
+### 2026-03-04（MCP-first 方向与工具扩展）
+
+- 改动范围：`apps/mcp-server/src/index.ts`、`skills/lucy-mesh-operator/*`、`README.md`
+- 主要内容：
+  - 明确项目交互倾向为 **MCP-first**：优先通过 MCP 工具完成节点生命周期与组网，不要求用户手动多终端执行。
+  - MCP 新增控制面工具：
+    - `get_active_node` / `set_active_node`（活动节点上下文切换）
+    - `daemon_start` / `daemon_stop` / `daemon_status`（本地 node-daemon 进程托管）
+    - `mesh_quickstart_local`（一键本地多节点启动+入网+互联+同步）
+  - MCP 内新增运行态持久化：`.local/mcp-runtime.json`（活动节点与托管 daemon 元数据）。
+  - README 的 MCP 章节改为 MCP-first 流程说明，并补充新工具列表与最短操作路径。
+  - `skills/lucy-mesh-operator` 同步升级：
+    - `SKILL.md` 改为 MCP-first 工作流
+    - `references/workflow.md` 新增 quickstart/daemon 生命周期路径
+    - `references/tool-playbook.md` 新增控制面工具映射
+    - `references/error-recovery.md` 增加 daemon/端口冲突恢复条目
+- 验证结果：
+  - `./node_modules/.bin/tsc -p apps/mcp-server/tsconfig.json --noEmit`
+  - `./node_modules/.bin/tsc -p apps/node-daemon/tsconfig.json --noEmit`
+  - `./node_modules/.bin/tsc -p packages/sdk/tsconfig.json --noEmit`
+  - `python3 /home/fredgu/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/lucy-mesh-operator`
