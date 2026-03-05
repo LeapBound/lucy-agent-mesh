@@ -443,6 +443,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "transfer_group_owner",
+        description: "Transfer one group owner role to another existing group member.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["groupId", "nextOwnerNodeId"],
+          properties: {
+            groupId: { type: "string" },
+            nextOwnerNodeId: { type: "string" },
+            clientMsgId: { type: "string" }
+          }
+        }
+      },
+      {
         name: "send_group_message",
         description: "Send one message into a group conversation and fanout to members.",
         inputSchema: {
@@ -829,6 +843,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const result = await getActiveClient().removeGroupMember({
           groupId,
           nodeId
+        });
+        return asTextResult(result);
+      }
+      case "transfer_group_owner": {
+        const groupId = readRequiredString(args, "groupId");
+        const nextOwnerNodeId = readRequiredString(args, "nextOwnerNodeId");
+        const clientMsgId = readOptionalString(args, "clientMsgId");
+        const result = await getActiveClient().transferGroupOwner({
+          groupId,
+          nextOwnerNodeId,
+          clientMsgId
         });
         return asTextResult(result);
       }

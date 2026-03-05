@@ -44,6 +44,7 @@ export interface GroupRecord {
   conversationId: string;
   name: string;
   createdByNodeId: string;
+  ownerNodeId: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -195,6 +196,7 @@ interface GroupRow {
   conversation_id: string;
   name: string;
   created_by_node_id: string;
+  owner_node_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -1496,12 +1498,15 @@ export class SQLiteMeshStore {
     conversationId: string;
     name: string;
     createdByNodeId: string;
+    ownerNodeId?: string;
     createdAt?: string;
     updatedAt?: string;
   }): GroupRecord {
     const now = input.updatedAt ?? new Date().toISOString();
     const existing = this.getGroup(input.groupId);
     const createdAt = input.createdAt ?? existing?.createdAt ?? now;
+    const ownerNodeId =
+      input.ownerNodeId ?? existing?.ownerNodeId ?? input.createdByNodeId;
 
     this.db
       .prepare(
@@ -1511,13 +1516,15 @@ export class SQLiteMeshStore {
           conversation_id,
           name,
           created_by_node_id,
+          owner_node_id,
           created_at,
           updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(group_id) DO UPDATE SET
           conversation_id = excluded.conversation_id,
           name = excluded.name,
           created_by_node_id = excluded.created_by_node_id,
+          owner_node_id = excluded.owner_node_id,
           updated_at = excluded.updated_at
         `
       )
@@ -1526,6 +1533,7 @@ export class SQLiteMeshStore {
         input.conversationId,
         input.name,
         input.createdByNodeId,
+        ownerNodeId,
         createdAt,
         now
       );
@@ -1548,6 +1556,7 @@ export class SQLiteMeshStore {
           conversation_id,
           name,
           created_by_node_id,
+          owner_node_id,
           created_at,
           updated_at
         FROM groups
@@ -1573,6 +1582,7 @@ export class SQLiteMeshStore {
           g.conversation_id,
           g.name,
           g.created_by_node_id,
+          g.owner_node_id,
           g.created_at,
           g.updated_at,
           COUNT(gm.node_id) AS member_count
@@ -1583,6 +1593,7 @@ export class SQLiteMeshStore {
           g.conversation_id,
           g.name,
           g.created_by_node_id,
+          g.owner_node_id,
           g.created_at,
           g.updated_at
         ORDER BY g.created_at ASC
@@ -1594,6 +1605,35 @@ export class SQLiteMeshStore {
       ...this.toGroupRecord(row),
       memberCount: row.member_count
     }));
+  }
+
+  public updateGroupOwner(input: {
+    groupId: string;
+    ownerNodeId: string;
+    updatedAt?: string;
+  }): GroupRecord {
+    const now = input.updatedAt ?? new Date().toISOString();
+    const result = this.db
+      .prepare(
+        `
+        UPDATE groups
+        SET owner_node_id = ?, updated_at = ?
+        WHERE group_id = ?
+        `
+      )
+      .run(input.ownerNodeId, now, input.groupId);
+
+    if (result.changes === 0) {
+      throw new Error("group not found");
+    }
+
+    const updated = this.getGroup(input.groupId);
+
+    if (!updated) {
+      throw new Error("failed to persist group owner");
+    }
+
+    return updated;
   }
 
   public upsertGroupMember(input: {
@@ -1782,11 +1822,14 @@ export class SQLiteMeshStore {
   }
 
   private toGroupRecord(row: GroupRow): GroupRecord {
+    const ownerNodeId = row.owner_node_id ?? row.created_by_node_id;
+
     return {
       groupId: row.group_id,
       conversationId: row.conversation_id,
       name: row.name,
       createdByNodeId: row.created_by_node_id,
+      ownerNodeId,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -1950,6 +1993,7 @@ export class SQLiteMeshStore {
         conversation_id TEXT NOT NULL UNIQUE,
         name TEXT NOT NULL,
         created_by_node_id TEXT NOT NULL,
+        owner_node_id TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -2052,5 +2096,22 @@ export class SQLiteMeshStore {
         throw error;
       }
     }
+
+    try {
+      this.db.exec("ALTER TABLE groups ADD COLUMN owner_node_id TEXT;");
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !error.message.includes("duplicate column name")
+      ) {
+        throw error;
+      }
+    }
+
+    this.db.exec(`
+      UPDATE groups
+      SET owner_node_id = created_by_node_id
+      WHERE owner_node_id IS NULL OR owner_node_id = '';
+    `);
   }
 }

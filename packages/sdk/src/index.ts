@@ -48,6 +48,7 @@ export interface GroupSummary {
   conversationId: string;
   name: string;
   createdByNodeId: string;
+  ownerNodeId: string;
   createdAt: string;
   updatedAt: string;
   memberCount: number;
@@ -367,6 +368,26 @@ export class MeshNodeClient {
     return this.request(
       "DELETE",
       `/v1/groups/${encodeURIComponent(input.groupId)}/members/${encodeURIComponent(input.nodeId)}`
+    );
+  }
+
+  public async transferGroupOwner(input: {
+    groupId: string;
+    nextOwnerNodeId: string;
+    clientMsgId?: string;
+  }): Promise<{
+    changed: boolean;
+    group: GroupSummary;
+    routedPeerUrls: string[];
+    event?: MeshEvent;
+  }> {
+    return this.request(
+      "POST",
+      `/v1/groups/${encodeURIComponent(input.groupId)}/owner`,
+      {
+        nextOwnerNodeId: input.nextOwnerNodeId,
+        clientMsgId: input.clientMsgId
+      }
     );
   }
 

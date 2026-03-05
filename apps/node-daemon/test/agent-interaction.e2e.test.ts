@@ -178,44 +178,105 @@ test("three-node group flow supports p2p group broadcast", async () => {
     });
 
     assert.equal(created.group.groupId, "eng-sync");
+    assert.equal(created.group.ownerNodeId, alpha.identity.nodeId);
     assert.equal(created.group.memberCount, 3);
     assert.equal(created.members.length, 3);
     assert.ok(created.routedPeerUrls.length > 0);
 
-    const sent = alpha.sendGroupMessage({
+    await bravo.syncFromPeers({ conversationId: created.group.conversationId });
+
+    assert.throws(
+      () =>
+        bravo.addGroupMember({
+          groupId: "eng-sync",
+          nodeId: "ghost-node"
+        }),
+      /only group owner can manage members/
+    );
+
+    const firstMessage = alpha.sendGroupMessage({
       groupId: "eng-sync",
       content: "sync at 10:30"
     });
 
     await waitUntil(async () => {
-      await bravo.syncFromPeers({ conversationId: sent.conversationId });
+      await bravo.syncFromPeers({ conversationId: firstMessage.conversationId });
       return hasMessage(
-        bravo.listEvents(sent.conversationId, 0, 50).events,
+        bravo.listEvents(firstMessage.conversationId, 0, 50).events,
         "sync at 10:30"
       );
     }, 2000);
 
     await waitUntil(async () => {
-      await charlie.syncFromPeers({ conversationId: sent.conversationId });
+      await charlie.syncFromPeers({ conversationId: firstMessage.conversationId });
       return hasMessage(
-        charlie.listEvents(sent.conversationId, 0, 50).events,
+        charlie.listEvents(firstMessage.conversationId, 0, 50).events,
         "sync at 10:30"
       );
     }, 2000);
 
-    assert.ok(
-      hasMessage(bravo.listEvents(sent.conversationId, 0, 50).events, "sync at 10:30")
+    const ownerTransfer = alpha.transferGroupOwner({
+      groupId: "eng-sync",
+      nextOwnerNodeId: bravo.identity.nodeId
+    });
+    assert.equal(ownerTransfer.changed, true);
+    assert.equal(ownerTransfer.group.ownerNodeId, bravo.identity.nodeId);
+
+    await waitUntil(async () => {
+      await bravo.syncFromPeers({ conversationId: created.group.conversationId });
+      const group = bravo
+        .listGroups()
+        .find((entry) => entry.groupId === created.group.groupId);
+      return group?.ownerNodeId === bravo.identity.nodeId;
+    }, 2000);
+
+    assert.throws(
+      () =>
+        alpha.removeGroupMember({
+          groupId: "eng-sync",
+          nodeId: charlie.identity.nodeId
+        }),
+      /only group owner can manage members/
     );
+
+    const removed = bravo.removeGroupMember({
+      groupId: "eng-sync",
+      nodeId: charlie.identity.nodeId
+    });
+    assert.equal(removed.changed, true);
+
+    const secondMessage = alpha.sendGroupMessage({
+      groupId: "eng-sync",
+      content: "owner switched"
+    });
+
+    await waitUntil(async () => {
+      await bravo.syncFromPeers({ conversationId: secondMessage.conversationId });
+      return hasMessage(
+        bravo.listEvents(secondMessage.conversationId, 0, 50).events,
+        "owner switched"
+      );
+    }, 2000);
+
     assert.ok(
       hasMessage(
-        charlie.listEvents(sent.conversationId, 0, 50).events,
-        "sync at 10:30"
+        bravo.listEvents(secondMessage.conversationId, 0, 50).events,
+        "owner switched"
       )
     );
 
     await charlie.syncFromPeers({ conversationId: created.group.conversationId });
     const charlieMembers = charlie.listGroupMembers("eng-sync");
-    assert.equal(charlieMembers.length, 3);
+    assert.equal(charlieMembers.length, 2);
+
+    assert.throws(
+      () =>
+        charlie.sendGroupMessage({
+          groupId: "eng-sync",
+          content: "can i still talk?"
+        }),
+      /local node is not a member of this group/
+    );
   } finally {
     restoreFetch();
     alpha.close();

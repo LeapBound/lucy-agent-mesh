@@ -436,6 +436,31 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    const groupOwnerRouteMatch = requestUrl.pathname.match(
+      /^\/v1\/groups\/([^/]+)\/owner$/
+    );
+
+    if (method === "POST" && groupOwnerRouteMatch) {
+      const groupId = decodeURIComponent(groupOwnerRouteMatch[1]);
+      const body = await readJsonBody<{
+        nextOwnerNodeId?: string;
+        clientMsgId?: string;
+      }>(request, config.maxBodyBytes);
+
+      if (!body.nextOwnerNodeId) {
+        sendError(response, 400, "nextOwnerNodeId is required");
+        return;
+      }
+
+      const result = meshNode.transferGroupOwner({
+        groupId,
+        nextOwnerNodeId: body.nextOwnerNodeId,
+        clientMsgId: body.clientMsgId
+      });
+      sendJson(response, 200, result);
+      return;
+    }
+
     const groupMessagesRouteMatch = requestUrl.pathname.match(
       /^\/v1\/groups\/([^/]+)\/messages$/
     );
@@ -873,6 +898,8 @@ function isClientInputError(message: string): boolean {
     message.includes("Unknown recipientNodeId") ||
     message.includes("groupId") ||
     message.includes("group not found") ||
+    message.includes("only group owner can manage members") ||
+    message.includes("nextOwnerNodeId") ||
     message.includes("local node is not a member of this group") ||
     message.includes("cannot remove local node from group") ||
     message.includes("exceeds max length")

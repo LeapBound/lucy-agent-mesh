@@ -206,6 +206,7 @@ curl -s http://127.0.0.1:7010/v1/messages/direct \
 - 本地维护 `group + members`
 - 群消息仍是签名事件，通过已有 P2P fanout/sync 扩散
 - 不引入中心消息节点
+- 群主模型：默认创建者为群主，只有群主可加人/删人/转让群主
 
 ### 1) 创建群并加初始成员
 
@@ -229,7 +230,15 @@ curl -s http://127.0.0.1:7010/v1/groups/eng-sync/messages \
   -d '{"content":"standup at 10:30"}' | jq
 ```
 
-### 4) 查看群收件箱
+### 4) 转让群主（仅当前群主）
+
+```bash
+curl -s http://127.0.0.1:7010/v1/groups/eng-sync/owner \
+  -H "content-type: application/json" \
+  -d '{"nextOwnerNodeId":"<beta-node-id>"}' | jq
+```
+
+### 5) 查看群收件箱
 
 ```bash
 curl -s "http://127.0.0.1:7010/v1/groups/inbox?after=0&limit=50" | jq
@@ -358,6 +367,7 @@ NODE_API_URL=http://127.0.0.1:7010 pnpm dev:mcp
 - `list_group_members`
 - `add_group_member`
 - `remove_group_member`
+- `transfer_group_owner`
 - `send_group_message`
 - `group_inbox`
 - `create_conversation`
@@ -464,6 +474,7 @@ const { joinToken } = await client.createJoinToken({
 - `GET /v1/groups/:id/members`
 - `POST /v1/groups/:id/members`
 - `DELETE /v1/groups/:id/members/:nodeId`
+- `POST /v1/groups/:id/owner`
 - `POST /v1/groups/:id/messages`
 - `POST /v1/conversations`
 - `POST /v1/messages`
@@ -529,7 +540,7 @@ node --import tsx --test apps/node-daemon/test/**/*.test.ts
 当前已覆盖：
 - Solana anchor RPC 校验单测（not found / failed / signer mismatch / success）
 - 三节点交互 e2e（discovery -> introduction -> direct message）
-- 三节点群广播 e2e（create group -> broadcast -> members sync/inbox）
+- 三节点群广播 e2e（create group -> owner transfer -> owner-only member ops -> broadcast）
 
 > 这组 e2e 走的是“内存 P2P 路由模拟”，不依赖实际端口监听，适合本地与受限环境快速回归。
 

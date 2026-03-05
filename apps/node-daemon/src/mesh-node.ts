@@ -133,6 +133,7 @@ export interface GroupSummary {
   conversationId: string;
   name: string;
   createdByNodeId: string;
+  ownerNodeId: string;
   createdAt: string;
   updatedAt: string;
   memberCount: number;
@@ -172,6 +173,13 @@ export interface GroupMemberUpdateResult {
   changed: boolean;
   group: GroupSummary;
   members: GroupMember[];
+  routedPeerUrls: string[];
+  event?: MeshEvent;
+}
+
+export interface GroupOwnerTransferResult {
+  changed: boolean;
+  group: GroupSummary;
   routedPeerUrls: string[];
   event?: MeshEvent;
 }
@@ -343,6 +351,13 @@ type GroupControlEvent =
       type: "group.member_removed";
       groupId: string;
       nodeId: string;
+      actorNodeId: string;
+      issuedAt: string;
+    }
+  | {
+      type: "group.owner_transferred";
+      groupId: string;
+      nextOwnerNodeId: string;
       actorNodeId: string;
       issuedAt: string;
     };
@@ -1157,6 +1172,7 @@ export class MeshNode extends EventEmitter {
       conversationId,
       name: groupName,
       createdByNodeId: this.identity.nodeId,
+      ownerNodeId: this.identity.nodeId,
       createdAt: now,
       updatedAt: now
     });
@@ -1202,6 +1218,7 @@ export class MeshNode extends EventEmitter {
     clientMsgId?: string;
   }): GroupMemberUpdateResult {
     const group = this.getRequiredGroup(input.groupId);
+    this.assertLocalGroupOwner(group);
     const nodeId = normalizeGroupMemberNodeId(input.nodeId);
 
     if (this.store.getGroupMember(group.groupId, nodeId)) {
@@ -1259,6 +1276,7 @@ export class MeshNode extends EventEmitter {
     clientMsgId?: string;
   }): GroupMemberUpdateResult {
     const group = this.getRequiredGroup(input.groupId);
+    this.assertLocalGroupOwner(group);
     const nodeId = normalizeGroupMemberNodeId(input.nodeId);
 
     if (nodeId === this.identity.nodeId) {
@@ -1303,6 +1321,68 @@ export class MeshNode extends EventEmitter {
       changed: true,
       group: this.getRequiredGroupSummary(group.groupId),
       members: this.listGroupMembers(group.groupId),
+      routedPeerUrls,
+      event: persisted.event
+    };
+  }
+
+  public transferGroupOwner(input: {
+    groupId: string;
+    nextOwnerNodeId: string;
+    clientMsgId?: string;
+  }): GroupOwnerTransferResult {
+    const group = this.getRequiredGroup(input.groupId);
+    this.assertLocalGroupOwner(group);
+    const nextOwnerNodeId = normalizeGroupMemberNodeId(input.nextOwnerNodeId);
+
+    if (nextOwnerNodeId === group.ownerNodeId) {
+      return {
+        changed: false,
+        group: this.getRequiredGroupSummary(group.groupId),
+        routedPeerUrls: []
+      };
+    }
+
+    const isMember = this.store
+      .listGroupMembers(group.groupId)
+      .some((member) => member.nodeId === nextOwnerNodeId);
+
+    if (!isMember) {
+      throw new Error("nextOwnerNodeId must be an existing group member");
+    }
+
+    const now = new Date().toISOString();
+    this.store.updateGroupOwner({
+      groupId: group.groupId,
+      ownerNodeId: nextOwnerNodeId,
+      updatedAt: now
+    });
+
+    const controlEvent: GroupControlEvent = {
+      type: "group.owner_transferred",
+      groupId: group.groupId,
+      nextOwnerNodeId,
+      actorNodeId: this.identity.nodeId,
+      issuedAt: now
+    };
+    const routedPeerUrls = this.resolvePeerUrlsForNodeIds(
+      this.store
+        .listGroupMembers(group.groupId)
+        .map((member) => member.nodeId)
+        .filter((nodeId) => nodeId !== this.identity.nodeId)
+    );
+    const persisted = this.persistAndFanout(
+      this.toGroupControlUnsignedEvent(
+        controlEvent,
+        group.conversationId,
+        input.clientMsgId
+      ),
+      routedPeerUrls
+    );
+
+    return {
+      changed: true,
+      group: this.getRequiredGroupSummary(group.groupId),
       routedPeerUrls,
       event: persisted.event
     };
@@ -1895,6 +1975,12 @@ export class MeshNode extends EventEmitter {
     return toGroupSummary(this.getRequiredGroup(groupIdInput));
   }
 
+  private assertLocalGroupOwner(group: GroupWithMemberCount): void {
+    if (group.ownerNodeId !== this.identity.nodeId) {
+      throw new Error("only group owner can manage members");
+    }
+  }
+
   private resolvePeerUrlsForNodeIds(nodeIds: string[]): string[] {
     const urls: string[] = [];
 
@@ -1937,32 +2023,49 @@ export class MeshNode extends EventEmitter {
       return;
     }
 
-    this.applyGroupControlEvent(controlEvent, event.wallTime);
+    this.applyGroupControlEvent(controlEvent, event.senderId, event.wallTime);
   }
 
   private applyGroupControlEvent(
     controlEvent: GroupControlEvent,
+    senderNodeId: string,
     wallTime: string
   ): void {
+    if (normalizeGroupMemberNodeId(controlEvent.actorNodeId) !== senderNodeId) {
+      return;
+    }
+
     const groupId = normalizeGroupId(controlEvent.groupId);
     const conversationId = groupConversationId(groupId);
 
     if (controlEvent.type === "group.created") {
+      const actorNodeId = normalizeGroupMemberNodeId(controlEvent.actorNodeId);
+      const existingGroup = this.store.getGroup(groupId);
+
+      if (existingGroup && existingGroup.ownerNodeId !== senderNodeId) {
+        return;
+      }
+
       this.store.createConversation(conversationId);
       this.store.upsertGroup({
         groupId,
         conversationId,
         name: normalizeGroupName(controlEvent.name),
-        createdByNodeId: normalizeGroupMemberNodeId(controlEvent.actorNodeId),
-        createdAt: controlEvent.issuedAt || wallTime,
+        createdByNodeId: existingGroup?.createdByNodeId ?? actorNodeId,
+        ownerNodeId: existingGroup?.ownerNodeId ?? actorNodeId,
+        createdAt:
+          (existingGroup?.createdAt ?? controlEvent.issuedAt) || wallTime,
         updatedAt: wallTime
       });
 
-      for (const memberNodeId of dedupeNodeIds(controlEvent.memberNodeIds)) {
+      for (const memberNodeId of dedupeNodeIds([
+        actorNodeId,
+        ...controlEvent.memberNodeIds
+      ])) {
         this.store.upsertGroupMember({
           groupId,
           nodeId: normalizeGroupMemberNodeId(memberNodeId),
-          addedByNodeId: normalizeGroupMemberNodeId(controlEvent.actorNodeId),
+          addedByNodeId: actorNodeId,
           addedAt: controlEvent.issuedAt || wallTime,
           updatedAt: wallTime
         });
@@ -1971,18 +2074,29 @@ export class MeshNode extends EventEmitter {
       return;
     }
 
-    const existingGroup = this.store.getGroup(groupId);
+    let group = this.store.getGroup(groupId);
 
-    if (!existingGroup) {
+    if (!group) {
+      const actorNodeId = normalizeGroupMemberNodeId(controlEvent.actorNodeId);
       this.store.createConversation(conversationId);
       this.store.upsertGroup({
         groupId,
         conversationId,
         name: `group-${groupId.slice(0, 8)}`,
-        createdByNodeId: normalizeGroupMemberNodeId(controlEvent.actorNodeId),
+        createdByNodeId: actorNodeId,
+        ownerNodeId: actorNodeId,
         createdAt: controlEvent.issuedAt || wallTime,
         updatedAt: wallTime
       });
+      group = this.store.getGroup(groupId);
+    }
+
+    if (!group) {
+      return;
+    }
+
+    if (group.ownerNodeId !== senderNodeId) {
+      return;
     }
 
     if (controlEvent.type === "group.member_added") {
@@ -1997,10 +2111,36 @@ export class MeshNode extends EventEmitter {
     }
 
     if (controlEvent.type === "group.member_removed") {
+      const targetNodeId = normalizeGroupMemberNodeId(controlEvent.nodeId);
+
+      if (targetNodeId === group.ownerNodeId) {
+        return;
+      }
+
       this.store.removeGroupMember(
         groupId,
-        normalizeGroupMemberNodeId(controlEvent.nodeId)
+        targetNodeId
       );
+      return;
+    }
+
+    if (controlEvent.type === "group.owner_transferred") {
+      const nextOwnerNodeId = normalizeGroupMemberNodeId(
+        controlEvent.nextOwnerNodeId
+      );
+      const isMember = this.store
+        .listGroupMembers(groupId)
+        .some((member) => member.nodeId === nextOwnerNodeId);
+
+      if (!isMember) {
+        return;
+      }
+
+      this.store.updateGroupOwner({
+        groupId,
+        ownerNodeId: nextOwnerNodeId,
+        updatedAt: wallTime
+      });
     }
   }
 
@@ -2445,6 +2585,20 @@ function parseGroupControlEvent(content: string): GroupControlEvent | null {
         issuedAt
       };
     }
+
+    if (type === "group.owner_transferred") {
+      if (typeof record.nextOwnerNodeId !== "string") {
+        return null;
+      }
+
+      return {
+        type,
+        groupId,
+        nextOwnerNodeId: record.nextOwnerNodeId,
+        actorNodeId,
+        issuedAt
+      };
+    }
   } catch {
     return null;
   }
@@ -2521,6 +2675,7 @@ function toGroupSummary(group: GroupWithMemberCount): GroupSummary {
     conversationId: group.conversationId,
     name: group.name,
     createdByNodeId: group.createdByNodeId,
+    ownerNodeId: group.ownerNodeId,
     createdAt: group.createdAt,
     updatedAt: group.updatedAt,
     memberCount: group.memberCount
