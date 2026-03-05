@@ -20,6 +20,11 @@ export interface NodeConfig {
   solanaRpcTestnetUrl: string;
   solanaRpcMainnetUrl: string;
   solanaRpcTimeoutMs: number;
+  outboxFlushIntervalMs: number;
+  outboxBatchSize: number;
+  outboxMaxAttempts: number;
+  outboxRetryBaseMs: number;
+  outboxRetryMaxMs: number;
   maxBodyBytes: number;
 }
 
@@ -110,6 +115,11 @@ export function loadNodeConfig(): NodeConfig {
       "SOLANA_RPC_MAINNET_URL"
     ),
     solanaRpcTimeoutMs: parseNumber(process.env.SOLANA_RPC_TIMEOUT_MS, 5000),
+    outboxFlushIntervalMs: parseNumber(process.env.OUTBOX_FLUSH_INTERVAL_MS, 3000),
+    outboxBatchSize: parseNumber(process.env.OUTBOX_BATCH_SIZE, 100),
+    outboxMaxAttempts: parseNumber(process.env.OUTBOX_MAX_ATTEMPTS, 8),
+    outboxRetryBaseMs: parseNumber(process.env.OUTBOX_RETRY_BASE_MS, 1000),
+    outboxRetryMaxMs: parseNumber(process.env.OUTBOX_RETRY_MAX_MS, 60000),
     maxBodyBytes: parseNumber(process.env.MAX_BODY_BYTES, 512 * 1024)
   };
 }

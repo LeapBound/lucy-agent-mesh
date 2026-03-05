@@ -485,6 +485,37 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "outbox_status",
+        description: "Show current outbox queue stats (pending/delivered/dead).",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {}
+        }
+      },
+      {
+        name: "outbox_flush",
+        description: "Trigger one outbox delivery batch immediately.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            limit: { type: "number" }
+          }
+        }
+      },
+      {
+        name: "outbox_dead_letters",
+        description: "List dead-letter outbox records for troubleshooting.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            limit: { type: "number" }
+          }
+        }
+      },
+      {
         name: "create_conversation",
         description: "Create or register a conversation on this local mesh node.",
         inputSchema: {
@@ -877,6 +908,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           limit,
           groupId
         });
+        return asTextResult(result);
+      }
+      case "outbox_status": {
+        const result = await getActiveClient().getOutboxState();
+        return asTextResult(result);
+      }
+      case "outbox_flush": {
+        const limit = readOptionalNumber(args, "limit");
+        const result = await getActiveClient().flushOutbox(limit);
+        return asTextResult(result);
+      }
+      case "outbox_dead_letters": {
+        const limit = readOptionalNumber(args, "limit") ?? 50;
+        const result = await getActiveClient().listDeadLetters(limit);
         return asTextResult(result);
       }
       case "create_conversation": {

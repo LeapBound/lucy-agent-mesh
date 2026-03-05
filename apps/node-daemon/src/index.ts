@@ -293,6 +293,28 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (method === "GET" && requestUrl.pathname === "/v1/outbox") {
+      sendJson(response, 200, {
+        outbox: meshNode.getOutboxState()
+      });
+      return;
+    }
+
+    if (method === "GET" && requestUrl.pathname === "/v1/outbox/dead") {
+      const limit = Number(requestUrl.searchParams.get("limit") ?? "50");
+      sendJson(response, 200, {
+        deadLetters: meshNode.listDeadLetters(limit)
+      });
+      return;
+    }
+
+    if (method === "POST" && requestUrl.pathname === "/v1/outbox/flush") {
+      const body = await readJsonBody<{ limit?: number }>(request, config.maxBodyBytes);
+      const result = await meshNode.flushOutbox(body.limit);
+      sendJson(response, 200, result);
+      return;
+    }
+
     if (method === "POST" && requestUrl.pathname === "/v1/conversations") {
       const body = await readJsonBody<{ conversationId?: string }>(
         request,
@@ -849,6 +871,14 @@ const syncTimer = setInterval(() => {
   });
 }, config.syncIntervalMs);
 
+const outboxTimer = setInterval(() => {
+  void meshNode.flushOutbox().catch((error: unknown) => {
+    const message =
+      error instanceof Error ? error.message : "Unexpected outbox flush failure";
+    console.error("[node-daemon] outbox flush failed", { error: message });
+  });
+}, config.outboxFlushIntervalMs);
+
 server.listen(config.port, config.host, () => {
   const baseUrl = `http://${config.host}:${config.port}`;
 
@@ -863,6 +893,7 @@ server.listen(config.port, config.host, () => {
 
 function shutdown(): void {
   clearInterval(syncTimer);
+  clearInterval(outboxTimer);
   websocketServer.close();
   server.close(() => {
     meshNode.close();

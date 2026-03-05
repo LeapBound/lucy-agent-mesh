@@ -61,6 +61,28 @@ export interface GroupWithMemberCount extends GroupRecord {
   memberCount: number;
 }
 
+export type OutboxStatus = "pending" | "delivered" | "dead";
+
+export interface OutboxRecord {
+  id: number;
+  eventId: string;
+  peerUrl: string;
+  status: OutboxStatus;
+  attemptCount: number;
+  nextAttemptAt: string;
+  lastAttemptAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OutboxSummary {
+  pendingCount: number;
+  deliveredCount: number;
+  deadCount: number;
+  nextAttemptAt: string | null;
+}
+
 export interface NetworkConfigRecord {
   networkId: string;
   networkKey: string;
@@ -206,6 +228,19 @@ interface GroupMemberRow {
   node_id: string;
   added_by_node_id: string;
   added_at: string;
+  updated_at: string;
+}
+
+interface OutboxRow {
+  id: number;
+  event_id: string;
+  peer_url: string;
+  status: string;
+  attempt_count: number;
+  next_attempt_at: string;
+  last_attempt_at: string | null;
+  last_error: string | null;
+  created_at: string;
   updated_at: string;
 }
 
@@ -1776,6 +1811,192 @@ export class SQLiteMeshStore {
     return rows.map((row) => this.toStoredEvent(row));
   }
 
+  public enqueueOutboxTargets(input: {
+    eventId: string;
+    peerUrls: string[];
+    now?: string;
+  }): number {
+    const now = input.now ?? new Date().toISOString();
+    const uniquePeerUrls = [...new Set(input.peerUrls)];
+    let inserted = 0;
+
+    for (const peerUrl of uniquePeerUrls) {
+      const result = this.db
+        .prepare(
+          `
+          INSERT INTO outbox_messages (
+            event_id,
+            peer_url,
+            status,
+            attempt_count,
+            next_attempt_at,
+            last_attempt_at,
+            last_error,
+            created_at,
+            updated_at
+          ) VALUES (?, ?, 'pending', 0, ?, NULL, NULL, ?, ?)
+          ON CONFLICT(event_id, peer_url) DO NOTHING
+          `
+        )
+        .run(input.eventId, peerUrl, now, now, now);
+
+      inserted += Number(result.changes);
+    }
+
+    return inserted;
+  }
+
+  public listDueOutboxMessages(limit: number, nowIso?: string): OutboxRecord[] {
+    const now = nowIso ?? new Date().toISOString();
+    const safeLimit = Math.max(Math.floor(limit), 1);
+    const rows = this.db
+      .prepare(
+        `
+        SELECT
+          id,
+          event_id,
+          peer_url,
+          status,
+          attempt_count,
+          next_attempt_at,
+          last_attempt_at,
+          last_error,
+          created_at,
+          updated_at
+        FROM outbox_messages
+        WHERE status = 'pending'
+          AND next_attempt_at <= ?
+        ORDER BY next_attempt_at ASC, id ASC
+        LIMIT ?
+        `
+      )
+      .all(now, safeLimit) as unknown as OutboxRow[];
+
+    return rows.map((row) => this.toOutboxRecord(row));
+  }
+
+  public markOutboxDelivered(input: { id: number; now?: string }): void {
+    const now = input.now ?? new Date().toISOString();
+
+    this.db
+      .prepare(
+        `
+        UPDATE outbox_messages
+        SET
+          status = 'delivered',
+          last_attempt_at = ?,
+          last_error = NULL,
+          updated_at = ?
+        WHERE id = ?
+        `
+      )
+      .run(now, now, input.id);
+  }
+
+  public markOutboxRetry(input: {
+    id: number;
+    nextAttemptAt: string;
+    lastError: string | null;
+    now?: string;
+  }): void {
+    const now = input.now ?? new Date().toISOString();
+
+    this.db
+      .prepare(
+        `
+        UPDATE outbox_messages
+        SET
+          status = 'pending',
+          attempt_count = attempt_count + 1,
+          next_attempt_at = ?,
+          last_attempt_at = ?,
+          last_error = ?,
+          updated_at = ?
+        WHERE id = ?
+        `
+      )
+      .run(input.nextAttemptAt, now, input.lastError, now, input.id);
+  }
+
+  public markOutboxDead(input: {
+    id: number;
+    lastError: string | null;
+    now?: string;
+  }): void {
+    const now = input.now ?? new Date().toISOString();
+
+    this.db
+      .prepare(
+        `
+        UPDATE outbox_messages
+        SET
+          status = 'dead',
+          attempt_count = attempt_count + 1,
+          last_attempt_at = ?,
+          last_error = ?,
+          updated_at = ?
+        WHERE id = ?
+        `
+      )
+      .run(now, input.lastError, now, input.id);
+  }
+
+  public getOutboxSummary(): OutboxSummary {
+    const row = this.db
+      .prepare(
+        `
+        SELECT
+          SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+          SUM(CASE WHEN status = 'delivered' THEN 1 ELSE 0 END) AS delivered_count,
+          SUM(CASE WHEN status = 'dead' THEN 1 ELSE 0 END) AS dead_count,
+          MIN(CASE WHEN status = 'pending' THEN next_attempt_at ELSE NULL END) AS next_attempt_at
+        FROM outbox_messages
+        `
+      )
+      .get() as
+      | {
+          pending_count: number | null;
+          delivered_count: number | null;
+          dead_count: number | null;
+          next_attempt_at: string | null;
+        }
+      | undefined;
+
+    return {
+      pendingCount: row?.pending_count ?? 0,
+      deliveredCount: row?.delivered_count ?? 0,
+      deadCount: row?.dead_count ?? 0,
+      nextAttemptAt: row?.next_attempt_at ?? null
+    };
+  }
+
+  public listDeadOutboxMessages(limit: number): OutboxRecord[] {
+    const safeLimit = Math.max(Math.floor(limit), 1);
+    const rows = this.db
+      .prepare(
+        `
+        SELECT
+          id,
+          event_id,
+          peer_url,
+          status,
+          attempt_count,
+          next_attempt_at,
+          last_attempt_at,
+          last_error,
+          created_at,
+          updated_at
+        FROM outbox_messages
+        WHERE status = 'dead'
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?
+        `
+      )
+      .all(safeLimit) as unknown as OutboxRow[];
+
+    return rows.map((row) => this.toOutboxRecord(row));
+  }
+
   public isKnownSender(senderId: string, senderPubKey: string): boolean {
     return deriveNodeIdFromPublicKey(senderPubKey) === senderId;
   }
@@ -1841,6 +2062,27 @@ export class SQLiteMeshStore {
       nodeId: row.node_id,
       addedByNodeId: row.added_by_node_id,
       addedAt: row.added_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  private toOutboxRecord(row: OutboxRow): OutboxRecord {
+    const status = row.status;
+
+    if (status !== "pending" && status !== "delivered" && status !== "dead") {
+      throw new Error(`unexpected outbox status '${status}'`);
+    }
+
+    return {
+      id: row.id,
+      eventId: row.event_id,
+      peerUrl: row.peer_url,
+      status,
+      attemptCount: row.attempt_count,
+      nextAttemptAt: row.next_attempt_at,
+      lastAttemptAt: row.last_attempt_at,
+      lastError: row.last_error,
+      createdAt: row.created_at,
       updatedAt: row.updated_at
     };
   }
@@ -2013,6 +2255,25 @@ export class SQLiteMeshStore {
 
       CREATE INDEX IF NOT EXISTS idx_group_members_node
         ON group_members(node_id);
+
+      CREATE TABLE IF NOT EXISTS outbox_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id TEXT NOT NULL,
+        peer_url TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT NOT NULL,
+        last_attempt_at TEXT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_event_peer
+        ON outbox_messages(event_id, peer_url);
+
+      CREATE INDEX IF NOT EXISTS idx_outbox_pending_next
+        ON outbox_messages(status, next_attempt_at);
 
       CREATE TABLE IF NOT EXISTS network_config (
         id INTEGER PRIMARY KEY CHECK (id = 1),

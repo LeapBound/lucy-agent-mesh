@@ -70,6 +70,27 @@ export interface GroupInboxItem {
   event: MeshEvent;
 }
 
+export interface OutboxState {
+  pendingCount: number;
+  deliveredCount: number;
+  deadCount: number;
+  nextAttemptAt: string | null;
+  maxAttempts: number;
+}
+
+export interface OutboxRecord {
+  id: number;
+  eventId: string;
+  peerUrl: string;
+  status: "pending" | "delivered" | "dead";
+  attemptCount: number;
+  nextAttemptAt: string;
+  lastAttemptAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface NetworkState {
   configured: boolean;
   networkId: string | null;
@@ -438,6 +459,30 @@ export class MeshNodeClient {
     const suffix = params.toString();
     const path = suffix.length > 0 ? `/v1/groups/inbox?${suffix}` : "/v1/groups/inbox";
     return this.request("GET", path);
+  }
+
+  public async getOutboxState(): Promise<{
+    outbox: OutboxState;
+  }> {
+    return this.request("GET", "/v1/outbox");
+  }
+
+  public async flushOutbox(limit?: number): Promise<{
+    processed: number;
+    delivered: number;
+    retried: number;
+    dead: number;
+  }> {
+    return this.request("POST", "/v1/outbox/flush", { limit });
+  }
+
+  public async listDeadLetters(limit = 50): Promise<{
+    deadLetters: OutboxRecord[];
+  }> {
+    const params = new URLSearchParams({
+      limit: String(limit)
+    });
+    return this.request("GET", `/v1/outbox/dead?${params.toString()}`);
   }
 
   public async createConversation(conversationId?: string): Promise<{

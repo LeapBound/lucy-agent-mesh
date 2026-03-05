@@ -76,6 +76,21 @@
 - 小团队内网：局域网 IP + `PUBLIC_BASE_URL`
 - 跨公网：优先 VPN/组网隧道，再跑本系统
 
+### 同机多 Agent（可行）
+
+同一台电脑可以启动多个 agent 节点，关键是隔离：
+- 每个节点使用不同 `NODE_PORT`
+- 每个节点使用不同 `DATA_DIR`
+- 建议每个节点设置不同 `NODE_NAME`
+
+示例：
+
+```bash
+NODE_PORT=7010 NODE_NAME=agent-alpha DATA_DIR=.local/node-7010 pnpm dev
+NODE_PORT=7011 NODE_NAME=agent-beta  DATA_DIR=.local/node-7011 pnpm dev
+NODE_PORT=7012 NODE_NAME=agent-gamma DATA_DIR=.local/node-7012 pnpm dev
+```
+
 ---
 
 ## 快速开始（3 分钟起两个节点）
@@ -370,6 +385,9 @@ NODE_API_URL=http://127.0.0.1:7010 pnpm dev:mcp
 - `transfer_group_owner`
 - `send_group_message`
 - `group_inbox`
+- `outbox_status`
+- `outbox_flush`
+- `outbox_dead_letters`
 - `create_conversation`
 - `send_message`
 - `send_direct_message`
@@ -437,6 +455,26 @@ const { joinToken } = await client.createJoinToken({
 
 ---
 
+## 可靠投递（Outbox）
+
+当前版本新增本地持久化 outbox（写本地 SQLite）：
+- 本地事件入库后先写 `outbox_messages`
+- 由后台定时器和手动接口执行投递
+- 失败自动指数退避重试
+- 超过最大尝试次数后进入 dead-letter
+
+调试接口：
+
+```bash
+curl -s http://127.0.0.1:7010/v1/outbox | jq
+curl -s http://127.0.0.1:7010/v1/outbox/dead?limit=20 | jq
+curl -s http://127.0.0.1:7010/v1/outbox/flush \
+  -H "content-type: application/json" \
+  -d '{"limit":100}' | jq
+```
+
+---
+
 ## 架构一览
 
 - `apps/node-daemon`：每个节点进程（HTTP + WS + P2P）
@@ -476,6 +514,9 @@ const { joinToken } = await client.createJoinToken({
 - `DELETE /v1/groups/:id/members/:nodeId`
 - `POST /v1/groups/:id/owner`
 - `POST /v1/groups/:id/messages`
+- `GET /v1/outbox`
+- `GET /v1/outbox/dead?limit=50`
+- `POST /v1/outbox/flush`
 - `POST /v1/conversations`
 - `POST /v1/messages`
 - `POST /v1/messages/direct`
@@ -521,6 +562,11 @@ const { joinToken } = await client.createJoinToken({
 - `SOLANA_RPC_TESTNET_URL`（默认 `https://api.testnet.solana.com`）
 - `SOLANA_RPC_MAINNET_URL`（默认 `https://api.mainnet-beta.solana.com`）
 - `SOLANA_RPC_TIMEOUT_MS`（默认 `5000`）
+- `OUTBOX_FLUSH_INTERVAL_MS`（默认 `3000`）
+- `OUTBOX_BATCH_SIZE`（默认 `100`）
+- `OUTBOX_MAX_ATTEMPTS`（默认 `8`）
+- `OUTBOX_RETRY_BASE_MS`（默认 `1000`）
+- `OUTBOX_RETRY_MAX_MS`（默认 `60000`）
 - `SYNC_INTERVAL_MS`（默认 `15000`）
 - `MAX_BODY_BYTES`（默认 `524288`）
 
@@ -541,6 +587,7 @@ node --import tsx --test apps/node-daemon/test/**/*.test.ts
 - Solana anchor RPC 校验单测（not found / failed / signer mismatch / success）
 - 三节点交互 e2e（discovery -> introduction -> direct message）
 - 三节点群广播 e2e（create group -> owner transfer -> owner-only member ops -> broadcast）
+- Outbox 重试与 dead-letter e2e（failed delivery -> retry -> dead）
 
 > 这组 e2e 走的是“内存 P2P 路由模拟”，不依赖实际端口监听，适合本地与受限环境快速回归。
 

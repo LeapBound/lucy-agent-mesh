@@ -17,6 +17,8 @@ import {
   type GroupWithMemberCount,
   type IdentityBindingRecord,
   type NetworkConfigRecord,
+  type OutboxRecord,
+  type OutboxSummary,
   SQLiteMeshStore,
   type PeerDirectoryEntry,
   type KnownPeer,
@@ -182,6 +184,17 @@ export interface GroupOwnerTransferResult {
   group: GroupSummary;
   routedPeerUrls: string[];
   event?: MeshEvent;
+}
+
+export interface OutboxProcessResult {
+  processed: number;
+  delivered: number;
+  retried: number;
+  dead: number;
+}
+
+export interface OutboxStateView extends OutboxSummary {
+  maxAttempts: number;
 }
 
 export interface NetworkState {
@@ -374,6 +387,10 @@ export class MeshNode extends EventEmitter {
   private readonly identityRequireAnchorTx: boolean;
   private readonly solanaRpcConfig: SolanaRpcConfig;
   private readonly seenDiscoveryQueries = new Map<string, number>();
+  private readonly outboxBatchSize: number;
+  private readonly outboxMaxAttempts: number;
+  private readonly outboxRetryBaseMs: number;
+  private readonly outboxRetryMaxMs: number;
 
   public readonly identity;
   private localDisplayName: string | null;
@@ -394,6 +411,13 @@ export class MeshNode extends EventEmitter {
       mainnetRpcUrl: config.solanaRpcMainnetUrl,
       timeoutMs: config.solanaRpcTimeoutMs
     };
+    this.outboxBatchSize = Math.max(Math.floor(config.outboxBatchSize), 1);
+    this.outboxMaxAttempts = Math.max(Math.floor(config.outboxMaxAttempts), 1);
+    this.outboxRetryBaseMs = Math.max(Math.floor(config.outboxRetryBaseMs), 100);
+    this.outboxRetryMaxMs = Math.max(
+      Math.floor(config.outboxRetryMaxMs),
+      this.outboxRetryBaseMs
+    );
     this.identity = this.store.getOrCreateIdentity();
     this.localDisplayName = this.store.getLocalDisplayName();
     this.networkConfig = this.store.getNetworkConfig();
@@ -1958,6 +1982,78 @@ export class MeshNode extends EventEmitter {
     };
   }
 
+  public getOutboxState(): OutboxStateView {
+    return {
+      ...this.store.getOutboxSummary(),
+      maxAttempts: this.outboxMaxAttempts
+    };
+  }
+
+  public listDeadLetters(limit = 50): OutboxRecord[] {
+    const normalizedLimit = Number.isFinite(limit)
+      ? Math.min(Math.max(Math.floor(limit), 1), 500)
+      : 50;
+    return this.store.listDeadOutboxMessages(normalizedLimit);
+  }
+
+  public async flushOutbox(limit?: number): Promise<OutboxProcessResult> {
+    const normalizedLimit =
+      limit !== undefined && Number.isFinite(limit)
+        ? Math.min(Math.max(Math.floor(limit), 1), 1000)
+        : this.outboxBatchSize;
+    const due = this.store.listDueOutboxMessages(normalizedLimit);
+
+    if (due.length === 0) {
+      return {
+        processed: 0,
+        delivered: 0,
+        retried: 0,
+        dead: 0
+      };
+    }
+
+    const result: OutboxProcessResult = {
+      processed: 0,
+      delivered: 0,
+      retried: 0,
+      dead: 0
+    };
+
+    for (const item of due) {
+      result.processed += 1;
+
+      try {
+        await this.deliverOutboxMessage(item);
+        this.store.markOutboxDelivered({ id: item.id });
+        result.delivered += 1;
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "unknown outbox delivery error";
+        const attemptNumber = item.attemptCount + 1;
+
+        if (attemptNumber >= this.outboxMaxAttempts) {
+          this.store.markOutboxDead({
+            id: item.id,
+            lastError: trimErrorForStorage(message)
+          });
+          result.dead += 1;
+          continue;
+        }
+
+        const backoffMs = this.computeOutboxBackoffMs(attemptNumber);
+        const nextAttemptAt = new Date(Date.now() + backoffMs).toISOString();
+        this.store.markOutboxRetry({
+          id: item.id,
+          nextAttemptAt,
+          lastError: trimErrorForStorage(message)
+        });
+        result.retried += 1;
+      }
+    }
+
+    return result;
+  }
+
   private getRequiredGroup(groupIdInput: string): GroupWithMemberCount {
     const groupId = normalizeGroupId(groupIdInput);
     const group = this.store
@@ -2305,7 +2401,22 @@ export class MeshNode extends EventEmitter {
         this.emit("event", storedEvent);
       }
 
-      void this.fanoutEvent(event, targetPeerUrls);
+      const peerUrls =
+        targetPeerUrls && targetPeerUrls.length > 0
+          ? dedupeUrls(targetPeerUrls)
+          : this.store.listPeers().map((peer) => peer.url);
+
+      if (peerUrls.length > 0) {
+        this.store.enqueueOutboxTargets({
+          eventId: event.id,
+          peerUrls
+        });
+        const flushLimit = Math.min(
+          Math.max(peerUrls.length, 1),
+          this.outboxBatchSize
+        );
+        void this.flushOutbox(flushLimit);
+      }
     }
 
     return {
@@ -2314,23 +2425,25 @@ export class MeshNode extends EventEmitter {
     };
   }
 
-  private async fanoutEvent(
-    event: MeshEvent,
-    targetPeerUrls?: string[]
-  ): Promise<void> {
-    const peerUrls =
-      targetPeerUrls && targetPeerUrls.length > 0
-        ? dedupeUrls(targetPeerUrls)
-        : this.store.listPeers().map((peer) => peer.url);
+  private async deliverOutboxMessage(item: OutboxRecord): Promise<void> {
+    const event = this.store.getEventById(item.eventId);
 
-    await Promise.allSettled(
-      peerUrls.map((peerUrl) =>
-        this.postJson(`${peerUrl}/p2p/events`, {
-          from: this.identity.nodeId,
-          events: [event]
-        })
-      )
-    );
+    if (!event) {
+      throw new Error("outbox event not found in local store");
+    }
+
+    await this.postJson(`${item.peerUrl}/p2p/events`, {
+      from: this.identity.nodeId,
+      events: [toMeshEvent(event)]
+    });
+  }
+
+  private computeOutboxBackoffMs(attemptNumber: number): number {
+    const exponent = Math.max(attemptNumber - 1, 0);
+    const base = this.outboxRetryBaseMs * 2 ** exponent;
+    const capped = Math.min(base, this.outboxRetryMaxMs);
+    const jitter = Math.floor(Math.random() * Math.min(this.outboxRetryBaseMs, 500));
+    return capped + jitter;
   }
 
   private async pullConversationFromPeer(
@@ -2744,6 +2857,20 @@ function parseGroupControlEvent(content: string): GroupControlEvent | null {
 
 function dedupeUrls(urls: string[]): string[] {
   return [...new Set(urls)];
+}
+
+function trimErrorForStorage(message: string): string {
+  const value = message.trim();
+
+  if (!value) {
+    return "unknown error";
+  }
+
+  if (value.length > 1000) {
+    return `${value.slice(0, 997)}...`;
+  }
+
+  return value;
 }
 
 function normalizeOptionalText(

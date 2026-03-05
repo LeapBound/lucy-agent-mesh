@@ -369,6 +369,60 @@ test("group control projection converges after out-of-order control event ingest
   }
 });
 
+test("outbox retries failed deliveries and marks dead letters", async () => {
+  const fixtureRoot = path.resolve(
+    ".local",
+    `e2e-outbox-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
+
+  const alphaUrl = "http://mesh-alpha.local";
+  const alpha = createTestNode({
+    nodeName: "alpha-outbox",
+    publicBaseUrl: alphaUrl,
+    dataDir: path.join(fixtureRoot, "alpha")
+  });
+
+  const restoreFetch = installInMemoryP2PRouter([
+    { baseUrl: alphaUrl, node: alpha }
+  ]);
+
+  try {
+    alpha.initNetwork({
+      joinTokenIssuerUrl: alphaUrl,
+      joinTokenMaxUses: 2
+    });
+
+    await alpha.addPeer("http://missing-peer.local");
+    alpha.createConversation("outbox-demo");
+    alpha.sendMessage({
+      conversationId: "outbox-demo",
+      content: "retry me"
+    });
+
+    const initial = alpha.getOutboxState();
+    assert.ok(initial.pendingCount >= 1, "expected pending outbox records");
+
+    await waitUntil(async () => {
+      await alpha.flushOutbox(50);
+      const state = alpha.getOutboxState();
+      return state.deadCount >= 1;
+    }, 4000);
+
+    const final = alpha.getOutboxState();
+    assert.equal(final.deadCount, 1);
+    assert.equal(final.pendingCount, 0);
+
+    const deadLetters = alpha.listDeadLetters(10);
+    assert.ok(deadLetters.length >= 1);
+    assert.equal(deadLetters[0].status, "dead");
+    assert.ok((deadLetters[0].lastError ?? "").length > 0);
+  } finally {
+    restoreFetch();
+    alpha.close();
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
 function createTestNode(input: {
   nodeName: string;
   publicBaseUrl: string;
@@ -402,6 +456,11 @@ function createTestNode(input: {
     solanaRpcTestnetUrl: "https://api.testnet.solana.com",
     solanaRpcMainnetUrl: "https://api.mainnet-beta.solana.com",
     solanaRpcTimeoutMs: 5000,
+    outboxFlushIntervalMs: 2000,
+    outboxBatchSize: 64,
+    outboxMaxAttempts: 4,
+    outboxRetryBaseMs: 20,
+    outboxRetryMaxMs: 80,
     maxBodyBytes: 512 * 1024
   };
 
