@@ -1,6 +1,6 @@
 # lucy-agent-mesh
 
-> 让每个 Agent 都有自己的“本地神经系统”，而不是依赖一个中心大脑。
+> 去中心化、本地优先、TypeScript 原生的 Agent 通信层。
 
 `lucy-agent-mesh` 是一个 **去中心化、本地优先、TypeScript 原生** 的 Agent 通信骨架：
 - 每个 Agent 跑自己的本地节点（`node-daemon`）
@@ -9,11 +9,11 @@
 - 通过网络密钥加入同一个 Mesh，像 EasyTier 一样先“入网”再通信
 - 可被 Codex / Claude Code 直接接入（MCP + SDK）
 
-如果你正在做：**多 Agent 协作系统、自动化工作流网络、可离线恢复的 Agent 通信层**，它是一个能快速启动、也能持续演进的工程底座。
+适用场景：**多 Agent 协作系统、自动化工作流网络、可离线恢复的 Agent 通信层**。
 
 ---
 
-## 产品定位
+## 项目定位
 
 `lucy-agent-mesh` 的产品定位是：**基于区块链的 Agents 之间的微信**。
 
@@ -23,13 +23,13 @@
 
 ---
 
-## 为什么开发者会喜欢它
+## 适用场景与特性
 
-- **去中心化但可控**：没有中心消息中枢，仍可做确定性排序与增量同步
-- **本地优先**：每个节点本地 SQLite，断网、重启后状态仍可恢复
-- **安全入网**：共享 `networkKey` + `/p2p/*` 请求签名，未入网节点无法混入
-- **AI 友好**：内置 MCP（stdio）+ TypeScript SDK，Codex/Claude 可直接调用
-- **降低误发**：直发必须指定 `recipientNodeId`，并支持本地通讯录标签
+- 去中心化同步：没有中心消息中枢，使用确定性排序与增量同步
+- 本地优先存储：每个节点本地 SQLite，断网与重启后可恢复
+- 入网与鉴权：共享 `networkKey` + `/p2p/*` 请求签名
+- Agent 接入方式：内置 MCP（stdio）+ TypeScript SDK
+- 防误发机制：直发必须指定 `recipientNodeId`，可配合本地通讯录
 
 ---
 
@@ -482,21 +482,38 @@ node --import tsx --test apps/node-daemon/test/**/*.test.ts
 
 ---
 
+## 本地链 Anchor 一键验证
+
+运行本地链真实验证脚本（会自动启动 `solana-test-validator`、发交易、执行 `anchor` 绑定校验并清理）：
+
+```bash
+bash scripts/test-anchor-localnet.sh
+```
+
+可选参数：
+- `RPC_PORT`（默认 `18899`）
+- `FAUCET_PORT`（默认 `19900`）
+- `KEEP_ARTIFACTS=1`（保留日志与临时文件）
+
+依赖：
+- `solana` / `solana-keygen` / `solana-test-validator`
+- Node.js（建议 24+）
+
+---
+
 ## 设计取舍（当前阶段）
 
 - 不用中心排序节点：用会话内 Lamport 时钟做可重放顺序
 - 不用中心数据库：每节点本地存储，节点间增量同步
 - 入网门槛先做“共享密钥模型”：先保证实用，再逐步引入更强身份信任
-- 优先本地开发体验：先把 AI 集成链路打通，再做更复杂的自治治理
+- 优先本地开发体验：先打通 AI 集成链路，再逐步扩展治理能力
 
 ---
 
-## 想一起做大它？
+## 贡献与后续工作
 
-欢迎提 PR / Issue，一起把它打磨成真正可用于生产的 Agent Mesh 基础设施：
+欢迎提交 PR / Issue。当前重点工作：
 - 更强的身份与信任模型（分层密钥、可撤销凭证）
 - 更丰富的路由策略（广播域、能力路由、策略路由）
 - 更好用的可观测性（拓扑视图、延迟与丢包指标）
 - 更完善的测试矩阵（多节点混沌场景、重放与恢复）
-
-如果你也相信“AI Agent 应该像互联网节点一样彼此连接”，欢迎一起造。
