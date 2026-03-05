@@ -34,6 +34,7 @@ Examples:
 
 ## Commit & Pull Request Guidelines
 - Follow Conventional Commits used in history: `feat:`, `fix:`, `docs:`, `refactor:`.
+- Write commit message subjects in English.
 - Keep commits focused and message subjects concise.
 - PRs should include: change intent, affected paths, and validation commands/results.
 - Keep PR descriptions self-contained, since this repository no longer uses a separate `AGENT.md` worklog file.
