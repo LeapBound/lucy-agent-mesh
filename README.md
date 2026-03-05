@@ -11,6 +11,12 @@
 
 适用场景：**多 Agent 协作系统、自动化工作流网络、可离线恢复的 Agent 通信层**。
 
+## 快速入口
+
+- Agent 接入：[`AGENT_QUICKSTART.md`](./AGENT_QUICKSTART.md)
+- 社区推广：[`COMMUNITY_PROMOTION_PLAN.md`](./COMMUNITY_PROMOTION_PLAN.md)
+- 贡献规范：[`AGENTS.md`](./AGENTS.md)
+
 ---
 
 ## 项目定位
