@@ -2023,125 +2023,261 @@ export class MeshNode extends EventEmitter {
       return;
     }
 
-    this.applyGroupControlEvent(controlEvent, event.senderId, event.wallTime);
+    try {
+      this.rebuildGroupProjection(controlEvent.groupId);
+    } catch {
+      return;
+    }
   }
 
-  private applyGroupControlEvent(
-    controlEvent: GroupControlEvent,
-    senderNodeId: string,
-    wallTime: string
-  ): void {
-    if (normalizeGroupMemberNodeId(controlEvent.actorNodeId) !== senderNodeId) {
+  private rebuildGroupProjection(groupIdInput: string): void {
+    const groupId = normalizeGroupId(groupIdInput);
+    const conversationId = groupConversationId(groupId);
+    const storedEvents = this.listStoredEventsForConversation(conversationId);
+    const controlEventPairs: Array<{
+      event: MeshEvent;
+      controlEvent: GroupControlEvent;
+    }> = [];
+
+    for (const event of sortEvents(storedEvents.map((stored) => toMeshEvent(stored)))) {
+      if (event.kind !== "message") {
+        continue;
+      }
+
+      const controlEvent = parseGroupControlEvent(event.payload.content);
+
+      if (!controlEvent) {
+        continue;
+      }
+
+      try {
+        if (normalizeGroupId(controlEvent.groupId) !== groupId) {
+          continue;
+        }
+      } catch {
+        continue;
+      }
+
+      controlEventPairs.push({
+        event,
+        controlEvent
+      });
+    }
+
+    if (controlEventPairs.length === 0) {
       return;
     }
 
-    const groupId = normalizeGroupId(controlEvent.groupId);
-    const conversationId = groupConversationId(groupId);
+    type MemberState = {
+      addedByNodeId: string;
+      addedAt: string;
+      updatedAt: string;
+    };
+    type ProjectionState = {
+      groupId: string;
+      conversationId: string;
+      name: string;
+      createdByNodeId: string;
+      ownerNodeId: string;
+      createdAt: string;
+      updatedAt: string;
+      members: Map<string, MemberState>;
+    };
 
-    if (controlEvent.type === "group.created") {
-      const actorNodeId = normalizeGroupMemberNodeId(controlEvent.actorNodeId);
-      const existingGroup = this.store.getGroup(groupId);
+    let projection: ProjectionState | null = null;
 
-      if (existingGroup && existingGroup.ownerNodeId !== senderNodeId) {
-        return;
+    for (const { event, controlEvent } of controlEventPairs) {
+      let actorNodeId: string;
+      let issuedAt: string;
+
+      try {
+        actorNodeId = normalizeGroupMemberNodeId(controlEvent.actorNodeId);
+        issuedAt = controlEvent.issuedAt || event.wallTime;
+      } catch {
+        continue;
       }
 
-      this.store.createConversation(conversationId);
-      this.store.upsertGroup({
-        groupId,
-        conversationId,
-        name: normalizeGroupName(controlEvent.name),
-        createdByNodeId: existingGroup?.createdByNodeId ?? actorNodeId,
-        ownerNodeId: existingGroup?.ownerNodeId ?? actorNodeId,
-        createdAt:
-          (existingGroup?.createdAt ?? controlEvent.issuedAt) || wallTime,
-        updatedAt: wallTime
-      });
+      if (actorNodeId !== event.senderId) {
+        continue;
+      }
 
-      for (const memberNodeId of dedupeNodeIds([
-        actorNodeId,
-        ...controlEvent.memberNodeIds
-      ])) {
-        this.store.upsertGroupMember({
+      if (controlEvent.type === "group.created") {
+        if (projection) {
+          continue;
+        }
+
+        let name: string;
+
+        try {
+          name = normalizeGroupName(controlEvent.name);
+        } catch {
+          continue;
+        }
+
+        const members = new Map<string, MemberState>();
+        const seedMembers = dedupeNodeIds([
+          actorNodeId,
+          ...controlEvent.memberNodeIds
+        ]);
+
+        for (const memberNodeIdRaw of seedMembers) {
+          try {
+            const memberNodeId = normalizeGroupMemberNodeId(memberNodeIdRaw);
+            members.set(memberNodeId, {
+              addedByNodeId: actorNodeId,
+              addedAt: issuedAt,
+              updatedAt: issuedAt
+            });
+          } catch {
+            continue;
+          }
+        }
+
+        if (!members.has(actorNodeId)) {
+          members.set(actorNodeId, {
+            addedByNodeId: actorNodeId,
+            addedAt: issuedAt,
+            updatedAt: issuedAt
+          });
+        }
+
+        projection = {
           groupId,
-          nodeId: normalizeGroupMemberNodeId(memberNodeId),
-          addedByNodeId: actorNodeId,
-          addedAt: controlEvent.issuedAt || wallTime,
-          updatedAt: wallTime
+          conversationId,
+          name,
+          createdByNodeId: actorNodeId,
+          ownerNodeId: actorNodeId,
+          createdAt: issuedAt,
+          updatedAt: issuedAt,
+          members
+        };
+        continue;
+      }
+
+      if (!projection) {
+        continue;
+      }
+
+      if (projection.ownerNodeId !== actorNodeId) {
+        continue;
+      }
+
+      if (controlEvent.type === "group.member_added") {
+        try {
+          const targetNodeId = normalizeGroupMemberNodeId(controlEvent.nodeId);
+          projection.members.set(targetNodeId, {
+            addedByNodeId: actorNodeId,
+            addedAt: issuedAt,
+            updatedAt: issuedAt
+          });
+          projection.updatedAt = issuedAt;
+        } catch {
+          continue;
+        }
+        continue;
+      }
+
+      if (controlEvent.type === "group.member_removed") {
+        try {
+          const targetNodeId = normalizeGroupMemberNodeId(controlEvent.nodeId);
+
+          if (targetNodeId === projection.ownerNodeId) {
+            continue;
+          }
+
+          if (projection.members.delete(targetNodeId)) {
+            projection.updatedAt = issuedAt;
+          }
+        } catch {
+          continue;
+        }
+        continue;
+      }
+
+      if (controlEvent.type === "group.owner_transferred") {
+        try {
+          const nextOwnerNodeId = normalizeGroupMemberNodeId(
+            controlEvent.nextOwnerNodeId
+          );
+
+          if (!projection.members.has(nextOwnerNodeId)) {
+            continue;
+          }
+
+          projection.ownerNodeId = nextOwnerNodeId;
+          projection.updatedAt = issuedAt;
+        } catch {
+          continue;
+        }
+      }
+    }
+
+    if (!projection) {
+      return;
+    }
+
+    if (!projection.members.has(projection.ownerNodeId)) {
+      projection.ownerNodeId = projection.createdByNodeId;
+      if (!projection.members.has(projection.ownerNodeId)) {
+        projection.members.set(projection.ownerNodeId, {
+          addedByNodeId: projection.createdByNodeId,
+          addedAt: projection.createdAt,
+          updatedAt: projection.updatedAt
         });
       }
-
-      return;
     }
 
-    let group = this.store.getGroup(groupId);
+    this.store.createConversation(conversationId);
+    this.store.upsertGroup({
+      groupId: projection.groupId,
+      conversationId: projection.conversationId,
+      name: projection.name,
+      createdByNodeId: projection.createdByNodeId,
+      ownerNodeId: projection.ownerNodeId,
+      createdAt: projection.createdAt,
+      updatedAt: projection.updatedAt
+    });
 
-    if (!group) {
-      const actorNodeId = normalizeGroupMemberNodeId(controlEvent.actorNodeId);
-      this.store.createConversation(conversationId);
-      this.store.upsertGroup({
-        groupId,
-        conversationId,
-        name: `group-${groupId.slice(0, 8)}`,
-        createdByNodeId: actorNodeId,
-        ownerNodeId: actorNodeId,
-        createdAt: controlEvent.issuedAt || wallTime,
-        updatedAt: wallTime
-      });
-      group = this.store.getGroup(groupId);
+    const currentMembers = this.store.listGroupMembers(groupId);
+    const nextMemberNodeIds = new Set(projection.members.keys());
+
+    for (const currentMember of currentMembers) {
+      if (!nextMemberNodeIds.has(currentMember.nodeId)) {
+        this.store.removeGroupMember(groupId, currentMember.nodeId);
+      }
     }
 
-    if (!group) {
-      return;
-    }
-
-    if (group.ownerNodeId !== senderNodeId) {
-      return;
-    }
-
-    if (controlEvent.type === "group.member_added") {
+    for (const [nodeId, memberState] of projection.members.entries()) {
       this.store.upsertGroupMember({
         groupId,
-        nodeId: normalizeGroupMemberNodeId(controlEvent.nodeId),
-        addedByNodeId: normalizeGroupMemberNodeId(controlEvent.actorNodeId),
-        addedAt: controlEvent.issuedAt || wallTime,
-        updatedAt: wallTime
-      });
-      return;
-    }
-
-    if (controlEvent.type === "group.member_removed") {
-      const targetNodeId = normalizeGroupMemberNodeId(controlEvent.nodeId);
-
-      if (targetNodeId === group.ownerNodeId) {
-        return;
-      }
-
-      this.store.removeGroupMember(
-        groupId,
-        targetNodeId
-      );
-      return;
-    }
-
-    if (controlEvent.type === "group.owner_transferred") {
-      const nextOwnerNodeId = normalizeGroupMemberNodeId(
-        controlEvent.nextOwnerNodeId
-      );
-      const isMember = this.store
-        .listGroupMembers(groupId)
-        .some((member) => member.nodeId === nextOwnerNodeId);
-
-      if (!isMember) {
-        return;
-      }
-
-      this.store.updateGroupOwner({
-        groupId,
-        ownerNodeId: nextOwnerNodeId,
-        updatedAt: wallTime
+        nodeId,
+        addedByNodeId: memberState.addedByNodeId,
+        addedAt: memberState.addedAt,
+        updatedAt: memberState.updatedAt
       });
     }
+  }
+
+  private listStoredEventsForConversation(conversationId: string): StoredMeshEvent[] {
+    const results: StoredMeshEvent[] = [];
+    let after = 0;
+
+    while (true) {
+      const chunk = this.store.listEvents(conversationId, after, 1000);
+
+      if (chunk.length === 0) {
+        break;
+      }
+
+      results.push(...chunk);
+      after = chunk[chunk.length - 1].localSeq;
+
+      if (chunk.length < 1000) {
+        break;
+      }
+    }
+
+    return results;
   }
 
   private persistAndFanout(

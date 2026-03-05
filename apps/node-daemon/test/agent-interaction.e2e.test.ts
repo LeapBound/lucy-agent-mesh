@@ -286,6 +286,89 @@ test("three-node group flow supports p2p group broadcast", async () => {
   }
 });
 
+test("group control projection converges after out-of-order control event ingestion", async () => {
+  const fixtureRoot = path.resolve(
+    ".local",
+    `e2e-group-projection-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
+
+  const alpha = createTestNode({
+    nodeName: "alpha",
+    publicBaseUrl: "http://mesh-alpha.local",
+    dataDir: path.join(fixtureRoot, "alpha")
+  });
+  const beta = createTestNode({
+    nodeName: "beta",
+    publicBaseUrl: "http://mesh-beta.local",
+    dataDir: path.join(fixtureRoot, "beta")
+  });
+  const mirror = createTestNode({
+    nodeName: "mirror",
+    publicBaseUrl: "http://mesh-mirror.local",
+    dataDir: path.join(fixtureRoot, "mirror")
+  });
+
+  try {
+    const created = alpha.createGroup({
+      groupId: "projection-demo",
+      name: "Projection Demo",
+      memberNodeIds: []
+    });
+
+    alpha.addGroupMember({
+      groupId: created.group.groupId,
+      nodeId: beta.identity.nodeId
+    });
+
+    alpha.transferGroupOwner({
+      groupId: created.group.groupId,
+      nextOwnerNodeId: beta.identity.nodeId
+    });
+
+    const controlEvents = alpha
+      .listEvents(created.group.conversationId, 0, 100)
+      .events.filter((event) => isGroupControlMessage(event));
+
+    const createdEvent = controlEvents.find((event) =>
+      event.payload.content.includes('"type":"group.created"')
+    );
+    const addMemberEvent = controlEvents.find((event) =>
+      event.payload.content.includes('"type":"group.member_added"')
+    );
+    const transferOwnerEvent = controlEvents.find((event) =>
+      event.payload.content.includes('"type":"group.owner_transferred"')
+    );
+
+    assert.ok(createdEvent, "expected group.created control event");
+    assert.ok(addMemberEvent, "expected group.member_added control event");
+    assert.ok(transferOwnerEvent, "expected group.owner_transferred control event");
+
+    mirror.ingestPeerEvents([addMemberEvent]);
+    mirror.ingestPeerEvents([transferOwnerEvent]);
+    mirror.ingestPeerEvents([createdEvent]);
+
+    const mirroredGroup = mirror
+      .listGroups()
+      .find((group) => group.groupId === created.group.groupId);
+    assert.ok(mirroredGroup, "expected mirrored projection to create local group");
+    assert.equal(mirroredGroup.ownerNodeId, beta.identity.nodeId);
+
+    const mirroredMembers = mirror.listGroupMembers(created.group.groupId);
+    assert.equal(mirroredMembers.length, 2);
+    assert.ok(
+      mirroredMembers.some((member) => member.nodeId === alpha.identity.nodeId)
+    );
+    assert.ok(
+      mirroredMembers.some((member) => member.nodeId === beta.identity.nodeId)
+    );
+  } finally {
+    alpha.close();
+    beta.close();
+    mirror.close();
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
 function createTestNode(input: {
   nodeName: string;
   publicBaseUrl: string;
@@ -469,6 +552,16 @@ function hasMessage(events: Array<{ kind: string; payload: unknown }>, content: 
       (event.payload as { content: string }).content === content
     );
   });
+}
+
+function isGroupControlMessage(
+  event: MeshEvent & { localSeq: number }
+): event is MeshEvent & { localSeq: number; kind: "message"; payload: { content: string } } {
+  return (
+    event.kind === "message" &&
+    typeof event.payload.content === "string" &&
+    event.payload.content.startsWith("__groupctl:v1:")
+  );
 }
 
 async function waitUntil(check: () => Promise<boolean>, timeoutMs: number): Promise<void> {
