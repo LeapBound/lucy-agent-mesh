@@ -466,6 +466,22 @@ const { joinToken } = await client.createJoinToken({
 
 ---
 
+## 自动化测试（当前）
+
+运行 `node-daemon` 相关自动化测试：
+
+```bash
+node --import tsx --test apps/node-daemon/test/**/*.test.ts
+```
+
+当前已覆盖：
+- Solana anchor RPC 校验单测（not found / failed / signer mismatch / success）
+- 三节点交互 e2e（discovery -> introduction -> direct message）
+
+> 这组 e2e 走的是“内存 P2P 路由模拟”，不依赖实际端口监听，适合本地与受限环境快速回归。
+
+---
+
 ## 设计取舍（当前阶段）
 
 - 不用中心排序节点：用会话内 Lamport 时钟做可重放顺序
