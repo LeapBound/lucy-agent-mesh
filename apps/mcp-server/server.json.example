@@ -8,13 +8,13 @@
     "source": "github"
   },
   "version_detail": {
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@leapbound/lucy-agent-mcp-server",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "transport": {
         "type": "stdio"
       }

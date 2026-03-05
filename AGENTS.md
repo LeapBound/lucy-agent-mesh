@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 - `apps/node-daemon`: decentralized node daemon (HTTP/WebSocket), with routing in `src/index.ts` and mesh logic in `src/mesh-node.ts`.
-- `apps/mcp-server`: MCP stdio server exposing mesh operations to Codex/Claude Code.
+- `apps/mcp-server`: MCP stdio server exposing mesh operations to Codex/Claude Code (`@leapbound/lucy-agent-mcp-server`).
 - `packages/core`: shared types, event models, and protocol primitives.
 - `packages/storage-sqlite`: SQLite persistence, schema setup, and storage APIs.
 - `packages/sdk`: TypeScript client for node-daemon APIs.
@@ -12,7 +12,7 @@
 ## Build, Test, and Development Commands
 - `pnpm install`: install workspace dependencies.
 - `pnpm dev`: start `@lucy/node-daemon` in dev mode.
-- `pnpm dev:mcp`: start `@lucy/mcp-server` (stdio); set `NODE_API_URL` first.
+- `pnpm dev:mcp`: start `@leapbound/lucy-agent-mcp-server` (stdio); set `NODE_API_URL` first.
 - `pnpm build`: compile all workspace packages/apps.
 - `pnpm typecheck`: run strict TypeScript checks across the monorepo.
 

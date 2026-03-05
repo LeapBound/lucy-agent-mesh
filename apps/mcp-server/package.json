@@ -1,15 +1,49 @@
 {
-  "name": "@lucy/mcp-server",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@leapbound/lucy-agent-mcp-server",
+  "version": "0.2.0",
+  "private": false,
+  "description": "MCP stdio server for lucy-agent-mesh (local-first P2P agent communication)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LeapBound/lucy-agent-mesh.git",
+    "directory": "apps/mcp-server"
+  },
+  "homepage": "https://github.com/LeapBound/lucy-agent-mesh/tree/main/apps/mcp-server",
+  "bugs": {
+    "url": "https://github.com/LeapBound/lucy-agent-mesh/issues"
+  },
+  "keywords": [
+    "mcp",
+    "agent",
+    "p2p",
+    "typescript",
+    "lucy-agent-mesh"
+  ],
   "type": "module",
+  "bin": {
+    "lucy-mesh-mcp": "./dist/index.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "node --import tsx src/index.ts",
+    "start": "node dist/index.js",
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@lucy/sdk": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.17.5"
   }
 }

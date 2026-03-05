@@ -359,9 +359,14 @@ NODE_API_URL=http://127.0.0.1:7010 pnpm dev:mcp
 
 当前 MCP 是 **stdio transport**（不是 HTTP server 形式）。
 从 `0.2.0` 起，推荐 **MCP-first** 使用：让 Agent 通过 MCP 工具直接管理本地 node-daemon 进程和组网流程，而不是手动开多个终端。
+MCP npm 包：`@leapbound/lucy-agent-mcp-server`，可执行入口：`lucy-mesh-mcp`。
 
 维护者如需发布到 MCP Registry，请看：[`docs/MCP_REGISTRY_PUBLISH.md`](./docs/MCP_REGISTRY_PUBLISH.md)。
 模板文件：`apps/mcp-server/server.json.example`（复制为 `server.json` 后填写真实 npm 包信息）。
+
+如果通过 npm 全局安装 MCP 包并希望继续使用 `daemon_start` / `mesh_quickstart_local`：
+- 设定 `LUCY_MESH_REPO_ROOT`（或 `LUCY_NODE_DAEMON_DIR`）指向本仓库
+- 或自行运行 node-daemon，仅通过 `NODE_API_URL` 使用节点侧工具
 
 可用 MCP tools：
 - 运行控制面（MCP-first）：

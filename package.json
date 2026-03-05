@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "pnpm --filter @lucy/node-daemon dev",
-    "dev:mcp": "pnpm --filter @lucy/mcp-server dev",
+    "dev:mcp": "pnpm --filter @leapbound/lucy-agent-mcp-server dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck"
   },

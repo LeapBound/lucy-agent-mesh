@@ -1,5 +1,7 @@
+#!/usr/bin/env node
+
 import { spawn, type ChildProcess } from "node:child_process";
-import { createWriteStream, type WriteStream } from "node:fs";
+import { createWriteStream, existsSync, type WriteStream } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,7 +13,7 @@ import {
   ListToolsRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
 
-import { MeshNodeClient } from "@lucy/sdk";
+import { MeshNodeClient } from "./mesh-node-client.js";
 
 type DaemonState = "starting" | "running" | "stopped" | "failed";
 
@@ -44,10 +46,20 @@ interface ManagedProcess {
 const thisFile = fileURLToPath(import.meta.url);
 const thisDir = dirname(thisFile);
 const mcpAppDir = resolve(thisDir, "..");
-const repoRoot = resolve(mcpAppDir, "../..");
-const runtimeDir = resolve(repoRoot, ".local");
+const defaultRepoRoot = resolve(mcpAppDir, "../..");
+const repoRoot = resolve(
+  process.env.LUCY_MESH_REPO_ROOT ??
+    (isLucyMeshRepoRoot(defaultRepoRoot) ? defaultRepoRoot : process.cwd())
+);
+const runtimeDir = resolve(
+  process.env.LUCY_MCP_RUNTIME_DIR ?? resolve(repoRoot, ".local")
+);
 const runtimeStatePath = resolve(runtimeDir, "mcp-runtime.json");
-const nodeDaemonDir = resolve(repoRoot, "apps/node-daemon");
+const nodeDaemonDir = resolve(
+  process.env.LUCY_NODE_DAEMON_DIR ?? resolve(repoRoot, "apps/node-daemon")
+);
+const nodeDaemonDistEntry = resolve(nodeDaemonDir, "dist/index.js");
+const nodeDaemonSrcEntry = resolve(nodeDaemonDir, "src/index.ts");
 
 const managedDaemons = new Map<string, ManagedDaemonRecord>();
 const managedProcesses = new Map<string, ManagedProcess>();
@@ -1091,9 +1103,10 @@ async function startManagedDaemon(input: {
   await mkdir(runtimeDir, { recursive: true });
   await mkdir(dataDir, { recursive: true });
 
+  const launchSpec = resolveNodeDaemonLaunchSpec();
   const logStream = createWriteStream(logPath, { flags: "a" });
-  const child = spawn(process.execPath, ["--import", "tsx", "src/index.ts"], {
-    cwd: nodeDaemonDir,
+  const child = spawn(process.execPath, launchSpec.args, {
+    cwd: launchSpec.cwd,
     env: {
       ...process.env,
       NODE_HOST: host,
@@ -1572,6 +1585,30 @@ async function saveRuntimeState(): Promise<void> {
 
   await mkdir(runtimeDir, { recursive: true });
   await writeFile(runtimeStatePath, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
+}
+
+function isLucyMeshRepoRoot(path: string): boolean {
+  return existsSync(resolve(path, "apps/node-daemon/src/index.ts"));
+}
+
+function resolveNodeDaemonLaunchSpec(): { cwd: string; args: string[] } {
+  if (existsSync(nodeDaemonDistEntry)) {
+    return {
+      cwd: nodeDaemonDir,
+      args: [nodeDaemonDistEntry]
+    };
+  }
+
+  if (existsSync(nodeDaemonSrcEntry)) {
+    return {
+      cwd: nodeDaemonDir,
+      args: ["--import", "tsx", nodeDaemonSrcEntry]
+    };
+  }
+
+  throw new Error(
+    "node-daemon entry not found. Set LUCY_NODE_DAEMON_DIR (or LUCY_MESH_REPO_ROOT) to a lucy-agent-mesh checkout, or run node-daemon separately and set NODE_API_URL."
+  );
 }
 
 function normalizeNodeApiUrl(input: string): string {

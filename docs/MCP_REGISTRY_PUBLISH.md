@@ -7,8 +7,8 @@
 
 ## 0. 当前仓库状态（先确认）
 
-- 当前 `apps/mcp-server/package.json` 仍是 `private: true`，默认不能直接发布到 npm。
-- 在真正发布前，需要先准备一个公开 npm 包（建议独立名称，例如 `@leapbound/lucy-agent-mcp-server`）。
+- `apps/mcp-server` 已配置为可发布 npm 包：`@leapbound/lucy-agent-mcp-server`。
+- 版本号建议与 MCP server 内部版本保持一致（当前示例为 `0.2.0`）。
 - Registry 元数据建议使用固定 `mcpName`：`io.github.leapbound.lucy-agent-mesh`。
 
 ## 1. 一次性准备
@@ -68,3 +68,14 @@ npx -y @modelcontextprotocol/mcp-publisher publish \
 1. 在 Registry 中检索 `io.github.leapbound.lucy-agent-mesh`，确认描述、版本、安装信息正确。
 2. 用真实客户端做一次安装/连接验证（stdio 启动 + 工具列表可见）。
 3. 若元数据错误，修正后重新发布新版本（不要复用错误版本号）。
+
+## 6. 运行时路径说明（重要）
+
+发布包默认能直接连接已运行的 node-daemon（`NODE_API_URL`）。
+
+如果要启用 `daemon_start` / `mesh_quickstart_local`（由 MCP 代管 node-daemon 进程），需保证 MCP 能找到 node-daemon 代码目录：
+- `LUCY_MESH_REPO_ROOT=/path/to/lucy-agent-mesh`
+- 或 `LUCY_NODE_DAEMON_DIR=/path/to/lucy-agent-mesh/apps/node-daemon`
+
+可选运行时目录：
+- `LUCY_MCP_RUNTIME_DIR=/custom/runtime/dir`（默认 `<repoRoot>/.local`）。
