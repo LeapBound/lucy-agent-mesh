@@ -362,7 +362,14 @@ NODE_API_URL=http://127.0.0.1:7010 pnpm dev:mcp
 MCP npm 包：`@leapbound/lucy-agent-mcp-server`，可执行入口：`lucy-mesh-mcp`。
 
 维护者如需发布到 MCP Registry，请看：[`docs/MCP_REGISTRY_PUBLISH.md`](./docs/MCP_REGISTRY_PUBLISH.md)。
-模板文件：`apps/mcp-server/server.json.example`（复制为 `server.json` 后填写真实 npm 包信息）。
+模板文件：`apps/mcp-server/server.json.example`；当前仓库已提供可直接维护的 `apps/mcp-server/server.json`。
+
+发布前检查与发布命令（仓库根目录）：
+
+```bash
+npm run mcp:check
+npm run mcp:publish
+```
 
 如果通过 npm 全局安装 MCP 包并希望继续使用 `daemon_start` / `mesh_quickstart_local`：
 - 设定 `LUCY_MESH_REPO_ROOT`（或 `LUCY_NODE_DAEMON_DIR`）指向本仓库

@@ -15,6 +15,7 @@
 - `pnpm dev:mcp`: start `@leapbound/lucy-agent-mcp-server` (stdio); set `NODE_API_URL` first.
 - `pnpm build`: compile all workspace packages/apps.
 - `pnpm typecheck`: run strict TypeScript checks across the monorepo.
+- `npm run mcp:check`: validate MCP publish metadata consistency and packageability.
 
 Examples:
 - `NODE_PORT=7010 NODE_NAME=agent-alpha pnpm dev`

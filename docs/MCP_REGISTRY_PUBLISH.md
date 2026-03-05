@@ -17,7 +17,7 @@
    <https://modelcontextprotocol.io/registry/about>
 2. 获取 Registry Token（本地发布用）：设置环境变量 `MCPP_AUTH_TOKEN`。
 3. 准备 npm 发布权限（`NPM_TOKEN`），确保目标包名可用且可公开发布。
-4. 基于仓库模板创建元数据文件：`apps/mcp-server/server.json`（可从 `apps/mcp-server/server.json.example` 复制）。
+4. 校验或更新仓库内元数据文件：`apps/mcp-server/server.json`（模板见 `apps/mcp-server/server.json.example`）。
 
 ## 2. 维护 `server.json`
 
@@ -38,6 +38,7 @@
 1. 发布 npm 包（示例）：
 
 ```bash
+./node_modules/.bin/tsc -p apps/mcp-server/tsconfig.json
 cd apps/mcp-server
 npm publish --access public
 ```
@@ -49,8 +50,26 @@ npx -y @modelcontextprotocol/mcp-publisher publish \
   --server-file apps/mcp-server/server.json
 ```
 
+等价的一键命令（在仓库根目录）：
+
+```bash
+npm run mcp:publish
+```
+
 > `mcp-publisher` 会优先读取 `MCPP_AUTH_TOKEN`。  
 > 若未设置 token，可先执行 `mcp-publisher login`。
+
+发布前建议先执行：
+
+```bash
+npm run mcp:check
+```
+
+它会校验：
+- `apps/mcp-server/package.json` 与 `apps/mcp-server/server.json` 版本一致
+- npm package identifier 与 server metadata 一致
+- `dist/index.js` 存在
+- `npm pack --dry-run` 可通过
 
 ## 4. CI 自动发布（推荐）
 

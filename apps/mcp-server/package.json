@@ -41,6 +41,7 @@
     "start": "node dist/index.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "release:check": "node ../../scripts/check-mcp-release.mjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
