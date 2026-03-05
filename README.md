@@ -588,6 +588,7 @@ node --import tsx --test apps/node-daemon/test/**/*.test.ts
 - 三节点交互 e2e（discovery -> introduction -> direct message）
 - 三节点群广播 e2e（create group -> owner transfer -> owner-only member ops -> broadcast）
 - Outbox 重试与 dead-letter e2e（failed delivery -> retry -> dead）
+- 混沌场景 e2e（分区恢复收敛 / 节点重启恢复 / 乱序重复摄入）
 
 > 这组 e2e 走的是“内存 P2P 路由模拟”，不依赖实际端口监听，适合本地与受限环境快速回归。
 

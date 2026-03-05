@@ -10,6 +10,19 @@ import { MeshNode, type P2PDiscoveryQueryRequest } from "../src/mesh-node.ts";
 
 const originalFetch = globalThis.fetch;
 
+interface InMemoryRouterRequest {
+  fromBaseUrl?: string;
+  fromNodeId?: string;
+  toBaseUrl: string;
+  method: string;
+  path: string;
+  body: unknown;
+}
+
+interface InMemoryRouterOptions {
+  shouldDrop?: (request: InMemoryRouterRequest) => boolean;
+}
+
 afterEach(() => {
   globalThis.fetch = originalFetch;
 });
@@ -423,6 +436,247 @@ test("outbox retries failed deliveries and marks dead letters", async () => {
   }
 });
 
+test("partition and heal flow converges via sync after network recovers", async () => {
+  const fixtureRoot = path.resolve(
+    ".local",
+    `e2e-partition-heal-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
+
+  const alphaUrl = "http://mesh-alpha.local";
+  const bravoUrl = "http://mesh-bravo.local";
+  const charlieUrl = "http://mesh-charlie.local";
+  let partitioned = true;
+
+  const alpha = createTestNode({
+    nodeName: "alpha-partition",
+    publicBaseUrl: alphaUrl,
+    dataDir: path.join(fixtureRoot, "alpha")
+  });
+  const bravo = createTestNode({
+    nodeName: "bravo-partition",
+    publicBaseUrl: bravoUrl,
+    dataDir: path.join(fixtureRoot, "bravo")
+  });
+  const charlie = createTestNode({
+    nodeName: "charlie-partition",
+    publicBaseUrl: charlieUrl,
+    dataDir: path.join(fixtureRoot, "charlie")
+  });
+
+  const restoreFetch = installInMemoryP2PRouter(
+    [
+      { baseUrl: alphaUrl, node: alpha },
+      { baseUrl: bravoUrl, node: bravo },
+      { baseUrl: charlieUrl, node: charlie }
+    ],
+    {
+      shouldDrop: ({ fromBaseUrl, toBaseUrl }) => {
+        if (!partitioned || !fromBaseUrl) {
+          return false;
+        }
+
+        const fromCharlie = fromBaseUrl === charlieUrl;
+        const toCharlie = toBaseUrl === charlieUrl;
+        return fromCharlie !== toCharlie;
+      }
+    }
+  );
+
+  try {
+    const network = alpha.initNetwork({
+      joinTokenIssuerUrl: alphaUrl,
+      joinTokenMaxUses: 8
+    });
+
+    await bravo.joinNetwork(network.joinToken);
+    await charlie.joinNetwork(network.joinToken);
+
+    await alpha.addPeer(bravoUrl);
+    await alpha.addPeer(charlieUrl);
+    await bravo.addPeer(alphaUrl);
+    await bravo.addPeer(charlieUrl);
+    await charlie.addPeer(alphaUrl);
+    await charlie.addPeer(bravoUrl);
+
+    const created = alpha.createGroup({
+      groupId: "partition-room",
+      name: "Partition Room",
+      memberNodeIds: [bravo.identity.nodeId, charlie.identity.nodeId]
+    });
+    const sent = alpha.sendGroupMessage({
+      groupId: created.group.groupId,
+      content: "message during partition"
+    });
+
+    await waitUntil(async () => {
+      await alpha.flushOutbox(50);
+      const state = alpha.getOutboxState();
+      return state.deadCount > 0 || state.pendingCount === 0;
+    }, 3000);
+
+    partitioned = false;
+
+    await waitUntil(async () => {
+      await charlie.syncFromPeers({ conversationId: sent.conversationId });
+      return hasMessage(
+        charlie.listEvents(sent.conversationId, 0, 100).events,
+        "message during partition"
+      );
+    }, 3000);
+
+    assert.ok(
+      hasMessage(
+        charlie.listEvents(sent.conversationId, 0, 100).events,
+        "message during partition"
+      )
+    );
+  } finally {
+    restoreFetch();
+    alpha.close();
+    bravo.close();
+    charlie.close();
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("node restart preserves state and resumes sync", async () => {
+  const fixtureRoot = path.resolve(
+    ".local",
+    `e2e-restart-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
+
+  const alphaUrl = "http://mesh-alpha.local";
+  const bravoUrl = "http://mesh-bravo.local";
+  const bravoDataDir = path.join(fixtureRoot, "bravo");
+
+  const alpha = createTestNode({
+    nodeName: "alpha-restart",
+    publicBaseUrl: alphaUrl,
+    dataDir: path.join(fixtureRoot, "alpha")
+  });
+  let bravo = createTestNode({
+    nodeName: "bravo-restart",
+    publicBaseUrl: bravoUrl,
+    dataDir: bravoDataDir
+  });
+
+  let restoreFetch = installInMemoryP2PRouter([
+    { baseUrl: alphaUrl, node: alpha },
+    { baseUrl: bravoUrl, node: bravo }
+  ]);
+
+  try {
+    const network = alpha.initNetwork({
+      joinTokenIssuerUrl: alphaUrl,
+      joinTokenMaxUses: 4
+    });
+    await bravo.joinNetwork(network.joinToken);
+    await alpha.addPeer(bravoUrl);
+    await bravo.addPeer(alphaUrl);
+
+    alpha.createConversation("restart-room");
+    alpha.sendMessage({
+      conversationId: "restart-room",
+      content: "before restart"
+    });
+
+    await waitUntil(async () => {
+      await bravo.syncFromPeers({ conversationId: "restart-room" });
+      return hasMessage(
+        bravo.listEvents("restart-room", 0, 20).events,
+        "before restart"
+      );
+    }, 3000);
+
+    restoreFetch();
+    bravo.close();
+
+    bravo = createTestNode({
+      nodeName: "bravo-restart",
+      publicBaseUrl: bravoUrl,
+      dataDir: bravoDataDir
+    });
+    restoreFetch = installInMemoryP2PRouter([
+      { baseUrl: alphaUrl, node: alpha },
+      { baseUrl: bravoUrl, node: bravo }
+    ]);
+
+    assert.ok(
+      hasMessage(bravo.listEvents("restart-room", 0, 20).events, "before restart")
+    );
+
+    alpha.sendMessage({
+      conversationId: "restart-room",
+      content: "after restart"
+    });
+
+    await waitUntil(async () => {
+      await bravo.syncFromPeers({ conversationId: "restart-room" });
+      return hasMessage(
+        bravo.listEvents("restart-room", 0, 50).events,
+        "after restart"
+      );
+    }, 3000);
+
+    assert.ok(
+      hasMessage(bravo.listEvents("restart-room", 0, 50).events, "after restart")
+    );
+  } finally {
+    restoreFetch();
+    alpha.close();
+    bravo.close();
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("out-of-order duplicate ingestion remains deterministic", async () => {
+  const fixtureRoot = path.resolve(
+    ".local",
+    `e2e-reorder-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
+
+  const alpha = createTestNode({
+    nodeName: "alpha-reorder",
+    publicBaseUrl: "http://mesh-alpha.local",
+    dataDir: path.join(fixtureRoot, "alpha")
+  });
+  const mirror = createTestNode({
+    nodeName: "mirror-reorder",
+    publicBaseUrl: "http://mesh-mirror.local",
+    dataDir: path.join(fixtureRoot, "mirror")
+  });
+
+  try {
+    alpha.createConversation("reorder-room");
+    alpha.sendMessage({ conversationId: "reorder-room", content: "m1" });
+    alpha.sendMessage({ conversationId: "reorder-room", content: "m2" });
+    alpha.sendMessage({ conversationId: "reorder-room", content: "m3" });
+
+    const ordered = alpha.listEvents("reorder-room", 0, 20).events;
+    const chaoticInput = [
+      ordered[2],
+      ordered[1],
+      ordered[2],
+      ordered[0],
+      ordered[1]
+    ];
+    const ingest = mirror.ingestPeerEvents(chaoticInput);
+
+    assert.equal(ingest.accepted, 3);
+    assert.equal(ingest.duplicates, 2);
+
+    const mirrored = mirror.listEvents("reorder-room", 0, 20).events;
+    const messages = mirrored
+      .filter((event) => event.kind === "message")
+      .map((event) => event.payload.content);
+    assert.deepEqual(messages, ["m1", "m2", "m3"]);
+  } finally {
+    alpha.close();
+    mirror.close();
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
 function createTestNode(input: {
   nodeName: string;
   publicBaseUrl: string;
@@ -468,9 +722,13 @@ function createTestNode(input: {
 }
 
 function installInMemoryP2PRouter(
-  entries: Array<{ baseUrl: string; node: MeshNode }>
+  entries: Array<{ baseUrl: string; node: MeshNode }>,
+  options?: InMemoryRouterOptions
 ): () => void {
   const router = new Map(entries.map((entry) => [entry.baseUrl, entry.node] as const));
+  const nodeIdToBaseUrl = new Map(
+    entries.map((entry) => [entry.node.identity.nodeId, entry.baseUrl] as const)
+  );
   const fetchBeforeInstall = globalThis.fetch;
 
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -484,6 +742,22 @@ function installInMemoryP2PRouter(
 
     const method = (init?.method ?? "GET").toUpperCase();
     const body = parseJsonBody(init?.body);
+    const senderNodeId = readHeader(init?.headers, "x-lucy-sender-node-id");
+    const fromBaseUrl =
+      typeof senderNodeId === "string" ? nodeIdToBaseUrl.get(senderNodeId) : undefined;
+
+    if (
+      options?.shouldDrop?.({
+        fromBaseUrl,
+        fromNodeId: senderNodeId,
+        toBaseUrl: baseUrl,
+        method,
+        path: requestUrl.pathname,
+        body
+      })
+    ) {
+      return jsonResponse(503, { error: "simulated network partition" });
+    }
 
     try {
       const result = await dispatchP2PRequest({
@@ -659,6 +933,45 @@ function parseJsonBody(body: RequestInit["body"] | undefined): unknown {
   }
 
   return JSON.parse(body) as unknown;
+}
+
+function readHeader(
+  headers: HeadersInit | undefined,
+  name: string
+): string | undefined {
+  if (!headers) {
+    return undefined;
+  }
+
+  const normalizedName = name.toLowerCase();
+
+  if (headers instanceof Headers) {
+    return headers.get(name) ?? headers.get(normalizedName) ?? undefined;
+  }
+
+  if (Array.isArray(headers)) {
+    for (const [key, value] of headers) {
+      if (key.toLowerCase() === normalizedName) {
+        return value;
+      }
+    }
+
+    return undefined;
+  }
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== normalizedName) {
+      continue;
+    }
+
+    if (Array.isArray(value)) {
+      return value[0];
+    }
+
+    return value;
+  }
+
+  return undefined;
 }
 
 function jsonResponse(status: number, payload: unknown): Response {
