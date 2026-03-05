@@ -1,0 +1,36 @@
+name: Publish MCP Registry Metadata
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_file:
+        description: "Path to server.json"
+        required: true
+        default: "apps/mcp-server/server.json"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install mcp-publisher
+        run: npm install --global @modelcontextprotocol/mcp-publisher
+
+      - name: Login via GitHub OIDC
+        env:
+          MCPP_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: mcp-publisher login github-oidc
+
+      - name: Publish metadata
+        run: mcp-publisher publish --server-file "${{ github.event.inputs.server_file }}"

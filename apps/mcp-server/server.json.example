@@ -1,0 +1,23 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
+  "name": "io.github.leapbound.lucy-agent-mesh",
+  "description": "Local-first P2P agent messaging MCP server for lucy-agent-mesh",
+  "status": "active",
+  "repository": {
+    "url": "https://github.com/LeapBound/lucy-agent-mesh",
+    "source": "github"
+  },
+  "version_detail": {
+    "version": "0.1.0"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@leapbound/lucy-agent-mcp-server",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
