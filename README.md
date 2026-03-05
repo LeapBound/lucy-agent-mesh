@@ -42,6 +42,7 @@
 - 增量同步：`frontier(sender_id -> lamport)`
 - 实时通知：WebSocket
 - 直发路由：按 `recipientNodeId` 定位
+- 群聊广播：群成员模型 + `group` 会话广播（仍为 P2P）
 - 本地通讯录：`alias/role/capabilities/notes`
 - 密钥入网：`init -> join token -> join`
 - 邀请码治理：`TTL + maxUses`，泄漏后影响面更小
@@ -199,6 +200,43 @@ curl -s http://127.0.0.1:7010/v1/messages/direct \
 
 ---
 
+## 群组广播（保持 P2P）
+
+`lucy-agent-mesh` 的群不是中心化房间服务，而是：
+- 本地维护 `group + members`
+- 群消息仍是签名事件，通过已有 P2P fanout/sync 扩散
+- 不引入中心消息节点
+
+### 1) 创建群并加初始成员
+
+```bash
+curl -s http://127.0.0.1:7010/v1/groups \
+  -H "content-type: application/json" \
+  -d '{"groupId":"eng-sync","name":"Engineering Sync","memberNodeIds":["<beta-node-id>","<charlie-node-id>"]}' | jq
+```
+
+### 2) 查看群成员
+
+```bash
+curl -s http://127.0.0.1:7010/v1/groups/eng-sync/members | jq
+```
+
+### 3) 群内发消息（广播）
+
+```bash
+curl -s http://127.0.0.1:7010/v1/groups/eng-sync/messages \
+  -H "content-type: application/json" \
+  -d '{"content":"standup at 10:30"}' | jq
+```
+
+### 4) 查看群收件箱
+
+```bash
+curl -s "http://127.0.0.1:7010/v1/groups/inbox?after=0&limit=50" | jq
+```
+
+---
+
 ## 链上身份绑定（Phase 2: Solana Anchor 校验）
 
 本阶段目标：把 `nodeId` 绑定到一个 Solana 钱包地址，并可选校验一笔链上交易签名（非 KYC）。
@@ -315,6 +353,13 @@ NODE_API_URL=http://127.0.0.1:7010 pnpm dev:mcp
 - `list_agents`
 - `list_contacts`
 - `upsert_contact`
+- `list_groups`
+- `create_group`
+- `list_group_members`
+- `add_group_member`
+- `remove_group_member`
+- `send_group_message`
+- `group_inbox`
 - `create_conversation`
 - `send_message`
 - `send_direct_message`
@@ -413,6 +458,13 @@ const { joinToken } = await client.createJoinToken({
 - `GET /v1/agents`
 - `GET /v1/contacts`
 - `POST /v1/contacts`
+- `GET /v1/groups`
+- `POST /v1/groups`
+- `GET /v1/groups/inbox?after=0&limit=200&groupId=<optional>`
+- `GET /v1/groups/:id/members`
+- `POST /v1/groups/:id/members`
+- `DELETE /v1/groups/:id/members/:nodeId`
+- `POST /v1/groups/:id/messages`
 - `POST /v1/conversations`
 - `POST /v1/messages`
 - `POST /v1/messages/direct`
@@ -477,6 +529,7 @@ node --import tsx --test apps/node-daemon/test/**/*.test.ts
 当前已覆盖：
 - Solana anchor RPC 校验单测（not found / failed / signer mismatch / success）
 - 三节点交互 e2e（discovery -> introduction -> direct message）
+- 三节点群广播 e2e（create group -> broadcast -> members sync/inbox）
 
 > 这组 e2e 走的是“内存 P2P 路由模拟”，不依赖实际端口监听，适合本地与受限环境快速回归。
 

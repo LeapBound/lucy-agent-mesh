@@ -376,6 +376,101 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "list_groups",
+        description: "List local groups and member counts.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {}
+        }
+      },
+      {
+        name: "create_group",
+        description:
+          "Create a P2P group and optionally add initial members by node id.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["name"],
+          properties: {
+            groupId: { type: "string" },
+            name: { type: "string" },
+            memberNodeIds: {
+              type: "array",
+              items: { type: "string" }
+            },
+            clientMsgId: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "list_group_members",
+        description: "List members of one group by group id.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["groupId"],
+          properties: {
+            groupId: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "add_group_member",
+        description: "Add one member node id into an existing group.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["groupId", "nodeId"],
+          properties: {
+            groupId: { type: "string" },
+            nodeId: { type: "string" },
+            clientMsgId: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "remove_group_member",
+        description: "Remove one member node id from an existing group.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["groupId", "nodeId"],
+          properties: {
+            groupId: { type: "string" },
+            nodeId: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "send_group_message",
+        description: "Send one message into a group conversation and fanout to members.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["groupId", "content"],
+          properties: {
+            groupId: { type: "string" },
+            content: { type: "string" },
+            clientMsgId: { type: "string" }
+          }
+        }
+      },
+      {
+        name: "group_inbox",
+        description:
+          "Read grouped inbox view (DM-like list) for groups the local node has joined.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            after: { type: "number" },
+            limit: { type: "number" },
+            groupId: { type: "string" }
+          }
+        }
+      },
+      {
         name: "create_conversation",
         description: "Create or register a conversation on this local mesh node.",
         inputSchema: {
@@ -692,6 +787,71 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           notes
         });
 
+        return asTextResult(result);
+      }
+      case "list_groups": {
+        const result = await getActiveClient().listGroups();
+        return asTextResult(result);
+      }
+      case "create_group": {
+        const groupId = readOptionalString(args, "groupId");
+        const name = readRequiredString(args, "name");
+        const memberNodeIds = readOptionalStringArray(args, "memberNodeIds");
+        const clientMsgId = readOptionalString(args, "clientMsgId");
+
+        const result = await getActiveClient().createGroup({
+          groupId,
+          name,
+          memberNodeIds,
+          clientMsgId
+        });
+        return asTextResult(result);
+      }
+      case "list_group_members": {
+        const groupId = readRequiredString(args, "groupId");
+        const result = await getActiveClient().listGroupMembers(groupId);
+        return asTextResult(result);
+      }
+      case "add_group_member": {
+        const groupId = readRequiredString(args, "groupId");
+        const nodeId = readRequiredString(args, "nodeId");
+        const clientMsgId = readOptionalString(args, "clientMsgId");
+        const result = await getActiveClient().addGroupMember({
+          groupId,
+          nodeId,
+          clientMsgId
+        });
+        return asTextResult(result);
+      }
+      case "remove_group_member": {
+        const groupId = readRequiredString(args, "groupId");
+        const nodeId = readRequiredString(args, "nodeId");
+        const result = await getActiveClient().removeGroupMember({
+          groupId,
+          nodeId
+        });
+        return asTextResult(result);
+      }
+      case "send_group_message": {
+        const groupId = readRequiredString(args, "groupId");
+        const content = readRequiredString(args, "content");
+        const clientMsgId = readOptionalString(args, "clientMsgId");
+        const result = await getActiveClient().sendGroupMessage({
+          groupId,
+          content,
+          clientMsgId
+        });
+        return asTextResult(result);
+      }
+      case "group_inbox": {
+        const after = readOptionalNumber(args, "after");
+        const limit = readOptionalNumber(args, "limit");
+        const groupId = readOptionalString(args, "groupId");
+        const result = await getActiveClient().listGroupInbox({
+          after,
+          limit,
+          groupId
+        });
         return asTextResult(result);
       }
       case "create_conversation": {

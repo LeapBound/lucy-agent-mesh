@@ -43,6 +43,32 @@ export interface AgentContactProfile {
   updatedAt: string | null;
 }
 
+export interface GroupSummary {
+  groupId: string;
+  conversationId: string;
+  name: string;
+  createdByNodeId: string;
+  createdAt: string;
+  updatedAt: string;
+  memberCount: number;
+}
+
+export interface GroupMember {
+  groupId: string;
+  nodeId: string;
+  addedByNodeId: string;
+  addedAt: string;
+  updatedAt: string;
+}
+
+export interface GroupInboxItem {
+  localSeq: number;
+  groupId: string;
+  groupName: string;
+  conversationId: string;
+  event: MeshEvent;
+}
+
 export interface NetworkState {
   configured: boolean;
   networkId: string | null;
@@ -279,6 +305,118 @@ export class MeshNodeClient {
     notes?: string | null;
   }): Promise<{ nodeId: string; profile: AgentContactProfile }> {
     return this.request("POST", "/v1/contacts", input);
+  }
+
+  public async listGroups(): Promise<{ groups: GroupSummary[] }> {
+    return this.request("GET", "/v1/groups");
+  }
+
+  public async createGroup(input: {
+    groupId?: string;
+    name: string;
+    memberNodeIds?: string[];
+    clientMsgId?: string;
+  }): Promise<{
+    group: GroupSummary;
+    members: GroupMember[];
+    inserted: boolean;
+    event: MeshEvent;
+    routedPeerUrls: string[];
+  }> {
+    return this.request("POST", "/v1/groups", input);
+  }
+
+  public async listGroupMembers(groupId: string): Promise<{
+    groupId: string;
+    members: GroupMember[];
+  }> {
+    return this.request("GET", `/v1/groups/${encodeURIComponent(groupId)}/members`);
+  }
+
+  public async addGroupMember(input: {
+    groupId: string;
+    nodeId: string;
+    clientMsgId?: string;
+  }): Promise<{
+    changed: boolean;
+    group: GroupSummary;
+    members: GroupMember[];
+    routedPeerUrls: string[];
+    event?: MeshEvent;
+  }> {
+    return this.request(
+      "POST",
+      `/v1/groups/${encodeURIComponent(input.groupId)}/members`,
+      {
+        nodeId: input.nodeId,
+        clientMsgId: input.clientMsgId
+      }
+    );
+  }
+
+  public async removeGroupMember(input: {
+    groupId: string;
+    nodeId: string;
+  }): Promise<{
+    changed: boolean;
+    group: GroupSummary;
+    members: GroupMember[];
+    routedPeerUrls: string[];
+    event?: MeshEvent;
+  }> {
+    return this.request(
+      "DELETE",
+      `/v1/groups/${encodeURIComponent(input.groupId)}/members/${encodeURIComponent(input.nodeId)}`
+    );
+  }
+
+  public async sendGroupMessage(input: {
+    groupId: string;
+    content: string;
+    clientMsgId?: string;
+  }): Promise<{
+    inserted: boolean;
+    event: MeshEvent;
+    groupId: string;
+    conversationId: string;
+    routedPeerUrls: string[];
+  }> {
+    return this.request(
+      "POST",
+      `/v1/groups/${encodeURIComponent(input.groupId)}/messages`,
+      {
+        content: input.content,
+        clientMsgId: input.clientMsgId
+      }
+    );
+  }
+
+  public async listGroupInbox(input?: {
+    after?: number;
+    limit?: number;
+    groupId?: string;
+  }): Promise<{
+    after: number;
+    nextAfter: number;
+    items: GroupInboxItem[];
+  }> {
+    const params = new URLSearchParams();
+
+    if (input?.after !== undefined) {
+      params.set("after", String(input.after));
+    }
+
+    if (input?.limit !== undefined) {
+      params.set("limit", String(input.limit));
+    }
+
+    if (input?.groupId) {
+      params.set("groupId", input.groupId);
+    }
+
+    const suffix = params.toString();
+    const path = suffix.length > 0 ? `/v1/groups/inbox?${suffix}` : "/v1/groups/inbox";
+    return this.request("GET", path);
   }
 
   public async createConversation(conversationId?: string): Promise<{

@@ -245,6 +245,54 @@ const server = http.createServer(async (request, response) => {
       return;
     }
 
+    if (method === "GET" && requestUrl.pathname === "/v1/groups") {
+      sendJson(response, 200, {
+        groups: meshNode.listGroups()
+      });
+      return;
+    }
+
+    if (method === "POST" && requestUrl.pathname === "/v1/groups") {
+      const body = await readJsonBody<{
+        groupId?: string;
+        name?: string;
+        memberNodeIds?: string[];
+        clientMsgId?: string;
+      }>(request, config.maxBodyBytes);
+
+      if (!body.name) {
+        sendError(response, 400, "name is required");
+        return;
+      }
+
+      const result = meshNode.createGroup({
+        groupId: body.groupId,
+        name: body.name,
+        memberNodeIds: Array.isArray(body.memberNodeIds)
+          ? body.memberNodeIds.filter(
+              (item): item is string => typeof item === "string"
+            )
+          : undefined,
+        clientMsgId: body.clientMsgId
+      });
+
+      sendJson(response, 201, result);
+      return;
+    }
+
+    if (method === "GET" && requestUrl.pathname === "/v1/groups/inbox") {
+      const after = Number(requestUrl.searchParams.get("after") ?? "0");
+      const limit = Number(requestUrl.searchParams.get("limit") ?? "200");
+      const groupId = requestUrl.searchParams.get("groupId") ?? undefined;
+      const result = meshNode.listGroupInbox({
+        after,
+        limit,
+        groupId
+      });
+      sendJson(response, 200, result);
+      return;
+    }
+
     if (method === "POST" && requestUrl.pathname === "/v1/conversations") {
       const body = await readJsonBody<{ conversationId?: string }>(
         request,
@@ -333,6 +381,82 @@ const server = http.createServer(async (request, response) => {
         message: body.message
       });
 
+      sendJson(response, 200, result);
+      return;
+    }
+
+    const groupMembersRouteMatch = requestUrl.pathname.match(
+      /^\/v1\/groups\/([^/]+)\/members$/
+    );
+
+    if (groupMembersRouteMatch) {
+      const groupId = decodeURIComponent(groupMembersRouteMatch[1]);
+
+      if (method === "GET") {
+        sendJson(response, 200, {
+          groupId,
+          members: meshNode.listGroupMembers(groupId)
+        });
+        return;
+      }
+
+      if (method === "POST") {
+        const body = await readJsonBody<{ nodeId?: string; clientMsgId?: string }>(
+          request,
+          config.maxBodyBytes
+        );
+
+        if (!body.nodeId) {
+          sendError(response, 400, "nodeId is required");
+          return;
+        }
+
+        const result = meshNode.addGroupMember({
+          groupId,
+          nodeId: body.nodeId,
+          clientMsgId: body.clientMsgId
+        });
+        sendJson(response, 200, result);
+        return;
+      }
+    }
+
+    const groupMemberRouteMatch = requestUrl.pathname.match(
+      /^\/v1\/groups\/([^/]+)\/members\/([^/]+)$/
+    );
+
+    if (method === "DELETE" && groupMemberRouteMatch) {
+      const groupId = decodeURIComponent(groupMemberRouteMatch[1]);
+      const nodeId = decodeURIComponent(groupMemberRouteMatch[2]);
+      const result = meshNode.removeGroupMember({
+        groupId,
+        nodeId
+      });
+      sendJson(response, 200, result);
+      return;
+    }
+
+    const groupMessagesRouteMatch = requestUrl.pathname.match(
+      /^\/v1\/groups\/([^/]+)\/messages$/
+    );
+
+    if (method === "POST" && groupMessagesRouteMatch) {
+      const groupId = decodeURIComponent(groupMessagesRouteMatch[1]);
+      const body = await readJsonBody<{ content?: string; clientMsgId?: string }>(
+        request,
+        config.maxBodyBytes
+      );
+
+      if (!body.content) {
+        sendError(response, 400, "content is required");
+        return;
+      }
+
+      const result = meshNode.sendGroupMessage({
+        groupId,
+        content: body.content,
+        clientMsgId: body.clientMsgId
+      });
       sendJson(response, 200, result);
       return;
     }
@@ -747,6 +871,10 @@ function isClientInputError(message: string): boolean {
     message.includes("mismatch") ||
     message.includes("does not match") ||
     message.includes("Unknown recipientNodeId") ||
+    message.includes("groupId") ||
+    message.includes("group not found") ||
+    message.includes("local node is not a member of this group") ||
+    message.includes("cannot remove local node from group") ||
     message.includes("exceeds max length")
   );
 }

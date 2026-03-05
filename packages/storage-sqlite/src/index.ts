@@ -39,6 +39,27 @@ export interface AgentContactRecord {
   updatedAt: string;
 }
 
+export interface GroupRecord {
+  groupId: string;
+  conversationId: string;
+  name: string;
+  createdByNodeId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GroupMemberRecord {
+  groupId: string;
+  nodeId: string;
+  addedByNodeId: string;
+  addedAt: string;
+  updatedAt: string;
+}
+
+export interface GroupWithMemberCount extends GroupRecord {
+  memberCount: number;
+}
+
 export interface NetworkConfigRecord {
   networkId: string;
   networkKey: string;
@@ -166,6 +187,23 @@ interface IdentityBindingRow {
   bound_at: string;
   revoked_at: string | null;
   created_at: string;
+  updated_at: string;
+}
+
+interface GroupRow {
+  group_id: string;
+  conversation_id: string;
+  name: string;
+  created_by_node_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface GroupMemberRow {
+  group_id: string;
+  node_id: string;
+  added_by_node_id: string;
+  added_at: string;
   updated_at: string;
 }
 
@@ -1453,6 +1491,251 @@ export class SQLiteMeshStore {
     };
   }
 
+  public upsertGroup(input: {
+    groupId: string;
+    conversationId: string;
+    name: string;
+    createdByNodeId: string;
+    createdAt?: string;
+    updatedAt?: string;
+  }): GroupRecord {
+    const now = input.updatedAt ?? new Date().toISOString();
+    const existing = this.getGroup(input.groupId);
+    const createdAt = input.createdAt ?? existing?.createdAt ?? now;
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO groups (
+          group_id,
+          conversation_id,
+          name,
+          created_by_node_id,
+          created_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(group_id) DO UPDATE SET
+          conversation_id = excluded.conversation_id,
+          name = excluded.name,
+          created_by_node_id = excluded.created_by_node_id,
+          updated_at = excluded.updated_at
+        `
+      )
+      .run(
+        input.groupId,
+        input.conversationId,
+        input.name,
+        input.createdByNodeId,
+        createdAt,
+        now
+      );
+
+    const updated = this.getGroup(input.groupId);
+
+    if (!updated) {
+      throw new Error("failed to persist group");
+    }
+
+    return updated;
+  }
+
+  public getGroup(groupId: string): GroupRecord | null {
+    const row = this.db
+      .prepare(
+        `
+        SELECT
+          group_id,
+          conversation_id,
+          name,
+          created_by_node_id,
+          created_at,
+          updated_at
+        FROM groups
+        WHERE group_id = ?
+        LIMIT 1
+        `
+      )
+      .get(groupId) as GroupRow | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    return this.toGroupRecord(row);
+  }
+
+  public listGroupsWithMemberCount(): GroupWithMemberCount[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT
+          g.group_id,
+          g.conversation_id,
+          g.name,
+          g.created_by_node_id,
+          g.created_at,
+          g.updated_at,
+          COUNT(gm.node_id) AS member_count
+        FROM groups g
+        LEFT JOIN group_members gm ON gm.group_id = g.group_id
+        GROUP BY
+          g.group_id,
+          g.conversation_id,
+          g.name,
+          g.created_by_node_id,
+          g.created_at,
+          g.updated_at
+        ORDER BY g.created_at ASC
+        `
+      )
+      .all() as unknown as Array<GroupRow & { member_count: number }>;
+
+    return rows.map((row) => ({
+      ...this.toGroupRecord(row),
+      memberCount: row.member_count
+    }));
+  }
+
+  public upsertGroupMember(input: {
+    groupId: string;
+    nodeId: string;
+    addedByNodeId: string;
+    addedAt?: string;
+    updatedAt?: string;
+  }): GroupMemberRecord {
+    const now = input.updatedAt ?? new Date().toISOString();
+    const addedAt = input.addedAt ?? now;
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO group_members (
+          group_id,
+          node_id,
+          added_by_node_id,
+          added_at,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(group_id, node_id) DO UPDATE SET
+          added_by_node_id = excluded.added_by_node_id,
+          added_at = excluded.added_at,
+          updated_at = excluded.updated_at
+        `
+      )
+      .run(input.groupId, input.nodeId, input.addedByNodeId, addedAt, now);
+
+    const updated = this.getGroupMember(input.groupId, input.nodeId);
+
+    if (!updated) {
+      throw new Error("failed to persist group member");
+    }
+
+    return updated;
+  }
+
+  public getGroupMember(
+    groupId: string,
+    nodeId: string
+  ): GroupMemberRecord | null {
+    const row = this.db
+      .prepare(
+        `
+        SELECT
+          group_id,
+          node_id,
+          added_by_node_id,
+          added_at,
+          updated_at
+        FROM group_members
+        WHERE group_id = ?
+          AND node_id = ?
+        LIMIT 1
+        `
+      )
+      .get(groupId, nodeId) as GroupMemberRow | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    return this.toGroupMemberRecord(row);
+  }
+
+  public removeGroupMember(groupId: string, nodeId: string): boolean {
+    const result = this.db
+      .prepare(
+        `
+        DELETE FROM group_members
+        WHERE group_id = ?
+          AND node_id = ?
+        `
+      )
+      .run(groupId, nodeId);
+
+    return result.changes > 0;
+  }
+
+  public listGroupMembers(groupId: string): GroupMemberRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT
+          group_id,
+          node_id,
+          added_by_node_id,
+          added_at,
+          updated_at
+        FROM group_members
+        WHERE group_id = ?
+        ORDER BY added_at ASC, node_id ASC
+        `
+      )
+      .all(groupId) as unknown as GroupMemberRow[];
+
+    return rows.map((row) => this.toGroupMemberRecord(row));
+  }
+
+  public listGroupIdsForMember(nodeId: string): string[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT group_id
+        FROM group_members
+        WHERE node_id = ?
+        ORDER BY group_id ASC
+        `
+      )
+      .all(nodeId) as Array<{ group_id: string }>;
+
+    return rows.map((row) => row.group_id);
+  }
+
+  public listEventsByConversations(
+    conversationIds: string[],
+    afterLocalSeq: number,
+    limit: number
+  ): StoredMeshEvent[] {
+    if (conversationIds.length === 0) {
+      return [];
+    }
+
+    const placeholders = conversationIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `
+        SELECT *
+        FROM events
+        WHERE conversation_id IN (${placeholders})
+          AND local_seq > ?
+        ORDER BY local_seq ASC
+        LIMIT ?
+        `
+      )
+      .all(...conversationIds, afterLocalSeq, limit) as unknown as EventRow[];
+
+    return rows.map((row) => this.toStoredEvent(row));
+  }
+
   public isKnownSender(senderId: string, senderPubKey: string): boolean {
     return deriveNodeIdFromPublicKey(senderPubKey) === senderId;
   }
@@ -1495,6 +1778,27 @@ export class SQLiteMeshStore {
       signature: row.signature,
       createdAt: row.created_at,
       payload
+    };
+  }
+
+  private toGroupRecord(row: GroupRow): GroupRecord {
+    return {
+      groupId: row.group_id,
+      conversationId: row.conversation_id,
+      name: row.name,
+      createdByNodeId: row.created_by_node_id,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  private toGroupMemberRecord(row: GroupMemberRow): GroupMemberRecord {
+    return {
+      groupId: row.group_id,
+      nodeId: row.node_id,
+      addedByNodeId: row.added_by_node_id,
+      addedAt: row.added_at,
+      updatedAt: row.updated_at
     };
   }
 
@@ -1640,6 +1944,31 @@ export class SQLiteMeshStore {
         notes TEXT,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS groups (
+        group_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        created_by_node_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_groups_conversation
+        ON groups(conversation_id);
+
+      CREATE TABLE IF NOT EXISTS group_members (
+        group_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        added_by_node_id TEXT NOT NULL,
+        added_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(group_id, node_id),
+        FOREIGN KEY(group_id) REFERENCES groups(group_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_group_members_node
+        ON group_members(node_id);
 
       CREATE TABLE IF NOT EXISTS network_config (
         id INTEGER PRIMARY KEY CHECK (id = 1),

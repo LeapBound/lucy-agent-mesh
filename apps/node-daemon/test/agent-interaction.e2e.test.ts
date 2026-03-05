@@ -123,6 +123,108 @@ test("three-node interaction flow supports discovery, introduction, and direct m
   }
 });
 
+test("three-node group flow supports p2p group broadcast", async () => {
+  const fixtureRoot = path.resolve(
+    ".local",
+    `e2e-group-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  );
+
+  const alphaUrl = "http://mesh-alpha.local";
+  const bravoUrl = "http://mesh-bravo.local";
+  const charlieUrl = "http://mesh-charlie.local";
+
+  const alpha = createTestNode({
+    nodeName: "alpha",
+    publicBaseUrl: alphaUrl,
+    dataDir: path.join(fixtureRoot, "alpha")
+  });
+  const bravo = createTestNode({
+    nodeName: "bravo",
+    publicBaseUrl: bravoUrl,
+    dataDir: path.join(fixtureRoot, "bravo")
+  });
+  const charlie = createTestNode({
+    nodeName: "charlie",
+    publicBaseUrl: charlieUrl,
+    dataDir: path.join(fixtureRoot, "charlie")
+  });
+
+  const restoreFetch = installInMemoryP2PRouter([
+    { baseUrl: alphaUrl, node: alpha },
+    { baseUrl: bravoUrl, node: bravo },
+    { baseUrl: charlieUrl, node: charlie }
+  ]);
+
+  try {
+    const network = alpha.initNetwork({
+      joinTokenIssuerUrl: alphaUrl,
+      joinTokenMaxUses: 8
+    });
+
+    await bravo.joinNetwork(network.joinToken);
+    await charlie.joinNetwork(network.joinToken);
+
+    await alpha.addPeer(bravoUrl);
+    await bravo.addPeer(alphaUrl);
+    await alpha.addPeer(charlieUrl);
+    await charlie.addPeer(alphaUrl);
+    await bravo.addPeer(charlieUrl);
+    await charlie.addPeer(bravoUrl);
+
+    const created = alpha.createGroup({
+      groupId: "eng-sync",
+      name: "Engineering Sync",
+      memberNodeIds: [bravo.identity.nodeId, charlie.identity.nodeId]
+    });
+
+    assert.equal(created.group.groupId, "eng-sync");
+    assert.equal(created.group.memberCount, 3);
+    assert.equal(created.members.length, 3);
+    assert.ok(created.routedPeerUrls.length > 0);
+
+    const sent = alpha.sendGroupMessage({
+      groupId: "eng-sync",
+      content: "sync at 10:30"
+    });
+
+    await waitUntil(async () => {
+      await bravo.syncFromPeers({ conversationId: sent.conversationId });
+      return hasMessage(
+        bravo.listEvents(sent.conversationId, 0, 50).events,
+        "sync at 10:30"
+      );
+    }, 2000);
+
+    await waitUntil(async () => {
+      await charlie.syncFromPeers({ conversationId: sent.conversationId });
+      return hasMessage(
+        charlie.listEvents(sent.conversationId, 0, 50).events,
+        "sync at 10:30"
+      );
+    }, 2000);
+
+    assert.ok(
+      hasMessage(bravo.listEvents(sent.conversationId, 0, 50).events, "sync at 10:30")
+    );
+    assert.ok(
+      hasMessage(
+        charlie.listEvents(sent.conversationId, 0, 50).events,
+        "sync at 10:30"
+      )
+    );
+
+    await charlie.syncFromPeers({ conversationId: created.group.conversationId });
+    const charlieMembers = charlie.listGroupMembers("eng-sync");
+    assert.equal(charlieMembers.length, 3);
+  } finally {
+    restoreFetch();
+    alpha.close();
+    bravo.close();
+    charlie.close();
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
 function createTestNode(input: {
   nodeName: string;
   publicBaseUrl: string;

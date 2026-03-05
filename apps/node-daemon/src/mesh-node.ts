@@ -13,6 +13,8 @@ import {
 } from "@lucy/core";
 import {
   type AgentContactRecord,
+  type GroupMemberRecord,
+  type GroupWithMemberCount,
   type IdentityBindingRecord,
   type NetworkConfigRecord,
   SQLiteMeshStore,
@@ -117,6 +119,61 @@ export interface UpsertAgentContactInput {
   role?: string | null;
   capabilities?: string | null;
   notes?: string | null;
+}
+
+export interface CreateGroupInput {
+  groupId?: string;
+  name: string;
+  memberNodeIds?: string[];
+  clientMsgId?: string;
+}
+
+export interface GroupSummary {
+  groupId: string;
+  conversationId: string;
+  name: string;
+  createdByNodeId: string;
+  createdAt: string;
+  updatedAt: string;
+  memberCount: number;
+}
+
+export interface GroupMember {
+  groupId: string;
+  nodeId: string;
+  addedByNodeId: string;
+  addedAt: string;
+  updatedAt: string;
+}
+
+export interface GroupMessageInput {
+  groupId: string;
+  content: string;
+  clientMsgId?: string;
+}
+
+export interface GroupMessageResult {
+  inserted: boolean;
+  event: MeshEvent;
+  groupId: string;
+  conversationId: string;
+  routedPeerUrls: string[];
+}
+
+export interface GroupInboxItem {
+  localSeq: number;
+  groupId: string;
+  groupName: string;
+  conversationId: string;
+  event: MeshEvent;
+}
+
+export interface GroupMemberUpdateResult {
+  changed: boolean;
+  group: GroupSummary;
+  members: GroupMember[];
+  routedPeerUrls: string[];
+  event?: MeshEvent;
 }
 
 export interface NetworkState {
@@ -266,7 +323,33 @@ interface PeerNodeInfo {
   displayName: string | null;
 }
 
+type GroupControlEvent =
+  | {
+      type: "group.created";
+      groupId: string;
+      name: string;
+      memberNodeIds: string[];
+      actorNodeId: string;
+      issuedAt: string;
+    }
+  | {
+      type: "group.member_added";
+      groupId: string;
+      nodeId: string;
+      actorNodeId: string;
+      issuedAt: string;
+    }
+  | {
+      type: "group.member_removed";
+      groupId: string;
+      nodeId: string;
+      actorNodeId: string;
+      issuedAt: string;
+    };
+
 const MAX_SYNC_BATCH = 1000;
+const GROUP_CONVERSATION_PREFIX = "grp:";
+const GROUP_CONTROL_PREFIX = "__groupctl:v1:";
 
 export class MeshNode extends EventEmitter {
   private readonly store: SQLiteMeshStore;
@@ -1033,6 +1116,301 @@ export class MeshNode extends EventEmitter {
     return toContactProfile(updated);
   }
 
+  public listGroups(): GroupSummary[] {
+    return this.store
+      .listGroupsWithMemberCount()
+      .map((group) => toGroupSummary(group));
+  }
+
+  public listGroupMembers(groupIdInput: string): GroupMember[] {
+    const groupId = normalizeGroupId(groupIdInput);
+    return this.store.listGroupMembers(groupId).map((member) => toGroupMember(member));
+  }
+
+  public createGroup(input: CreateGroupInput): {
+    group: GroupSummary;
+    members: GroupMember[];
+    inserted: boolean;
+    event: MeshEvent;
+    routedPeerUrls: string[];
+  } {
+    const groupId = normalizeGroupId(input.groupId ?? randomUUID());
+    const groupName = normalizeGroupName(input.name);
+    const existing = this.store.getGroup(groupId);
+
+    if (existing) {
+      throw new Error("groupId already exists");
+    }
+
+    const memberNodeIds = dedupeNodeIds([
+      this.identity.nodeId,
+      ...(input.memberNodeIds ?? []).map((nodeId) =>
+        normalizeGroupMemberNodeId(nodeId)
+      )
+    ]);
+    const conversationId = groupConversationId(groupId);
+    const now = new Date().toISOString();
+
+    this.store.createConversation(conversationId);
+    this.store.upsertGroup({
+      groupId,
+      conversationId,
+      name: groupName,
+      createdByNodeId: this.identity.nodeId,
+      createdAt: now,
+      updatedAt: now
+    });
+
+    for (const nodeId of memberNodeIds) {
+      this.store.upsertGroupMember({
+        groupId,
+        nodeId,
+        addedByNodeId: this.identity.nodeId,
+        addedAt: now,
+        updatedAt: now
+      });
+    }
+
+    const controlEvent: GroupControlEvent = {
+      type: "group.created",
+      groupId,
+      name: groupName,
+      memberNodeIds,
+      actorNodeId: this.identity.nodeId,
+      issuedAt: now
+    };
+    const routedPeerUrls = this.resolvePeerUrlsForNodeIds(
+      memberNodeIds.filter((nodeId) => nodeId !== this.identity.nodeId)
+    );
+    const persisted = this.persistAndFanout(
+      this.toGroupControlUnsignedEvent(controlEvent, conversationId, input.clientMsgId),
+      routedPeerUrls
+    );
+
+    return {
+      group: this.getRequiredGroupSummary(groupId),
+      members: this.listGroupMembers(groupId),
+      inserted: persisted.inserted,
+      event: persisted.event,
+      routedPeerUrls
+    };
+  }
+
+  public addGroupMember(input: {
+    groupId: string;
+    nodeId: string;
+    clientMsgId?: string;
+  }): GroupMemberUpdateResult {
+    const group = this.getRequiredGroup(input.groupId);
+    const nodeId = normalizeGroupMemberNodeId(input.nodeId);
+
+    if (this.store.getGroupMember(group.groupId, nodeId)) {
+      return {
+        changed: false,
+        group: this.getRequiredGroupSummary(group.groupId),
+        members: this.listGroupMembers(group.groupId),
+        routedPeerUrls: []
+      };
+    }
+
+    const now = new Date().toISOString();
+    this.store.upsertGroupMember({
+      groupId: group.groupId,
+      nodeId,
+      addedByNodeId: this.identity.nodeId,
+      addedAt: now,
+      updatedAt: now
+    });
+
+    const controlEvent: GroupControlEvent = {
+      type: "group.member_added",
+      groupId: group.groupId,
+      nodeId,
+      actorNodeId: this.identity.nodeId,
+      issuedAt: now
+    };
+    const routedPeerUrls = this.resolvePeerUrlsForNodeIds(
+      dedupeNodeIds([
+        ...this.store.listGroupMembers(group.groupId).map((member) => member.nodeId),
+        nodeId
+      ]).filter((memberNodeId) => memberNodeId !== this.identity.nodeId)
+    );
+    const persisted = this.persistAndFanout(
+      this.toGroupControlUnsignedEvent(
+        controlEvent,
+        group.conversationId,
+        input.clientMsgId
+      ),
+      routedPeerUrls
+    );
+
+    return {
+      changed: true,
+      group: this.getRequiredGroupSummary(group.groupId),
+      members: this.listGroupMembers(group.groupId),
+      routedPeerUrls,
+      event: persisted.event
+    };
+  }
+
+  public removeGroupMember(input: {
+    groupId: string;
+    nodeId: string;
+    clientMsgId?: string;
+  }): GroupMemberUpdateResult {
+    const group = this.getRequiredGroup(input.groupId);
+    const nodeId = normalizeGroupMemberNodeId(input.nodeId);
+
+    if (nodeId === this.identity.nodeId) {
+      throw new Error("cannot remove local node from group via this route");
+    }
+
+    const removed = this.store.removeGroupMember(group.groupId, nodeId);
+
+    if (!removed) {
+      return {
+        changed: false,
+        group: this.getRequiredGroupSummary(group.groupId),
+        members: this.listGroupMembers(group.groupId),
+        routedPeerUrls: []
+      };
+    }
+
+    const now = new Date().toISOString();
+    const controlEvent: GroupControlEvent = {
+      type: "group.member_removed",
+      groupId: group.groupId,
+      nodeId,
+      actorNodeId: this.identity.nodeId,
+      issuedAt: now
+    };
+    const routedPeerUrls = this.resolvePeerUrlsForNodeIds(
+      dedupeNodeIds([
+        ...this.store.listGroupMembers(group.groupId).map((member) => member.nodeId),
+        nodeId
+      ]).filter((memberNodeId) => memberNodeId !== this.identity.nodeId)
+    );
+    const persisted = this.persistAndFanout(
+      this.toGroupControlUnsignedEvent(
+        controlEvent,
+        group.conversationId,
+        input.clientMsgId
+      ),
+      routedPeerUrls
+    );
+
+    return {
+      changed: true,
+      group: this.getRequiredGroupSummary(group.groupId),
+      members: this.listGroupMembers(group.groupId),
+      routedPeerUrls,
+      event: persisted.event
+    };
+  }
+
+  public sendGroupMessage(input: GroupMessageInput): GroupMessageResult {
+    const group = this.getRequiredGroup(input.groupId);
+    const content = input.content.trim();
+
+    if (!content) {
+      throw new Error("content is required");
+    }
+
+    const members = this.store.listGroupMembers(group.groupId);
+    const isMember = members.some((member) => member.nodeId === this.identity.nodeId);
+
+    if (!isMember) {
+      throw new Error("local node is not a member of this group");
+    }
+
+    const routedPeerUrls = this.resolvePeerUrlsForNodeIds(
+      members
+        .map((member) => member.nodeId)
+        .filter((nodeId) => nodeId !== this.identity.nodeId)
+    );
+    const unsignedEvent: UnsignedMeshEvent = {
+      conversationId: group.conversationId,
+      senderId: this.identity.nodeId,
+      senderPubKey: this.identity.publicKeyB64,
+      clientMsgId: input.clientMsgId?.trim() || randomUUID(),
+      kind: "message",
+      lamport: this.store.nextLamport(group.conversationId),
+      wallTime: new Date().toISOString(),
+      payload: {
+        content
+      }
+    };
+    const result = this.persistAndFanout(
+      unsignedEvent,
+      routedPeerUrls.length > 0 ? routedPeerUrls : undefined
+    );
+
+    return {
+      ...result,
+      groupId: group.groupId,
+      conversationId: group.conversationId,
+      routedPeerUrls
+    };
+  }
+
+  public listGroupInbox(input?: {
+    after?: number;
+    limit?: number;
+    groupId?: string;
+  }): {
+    after: number;
+    nextAfter: number;
+    items: GroupInboxItem[];
+  } {
+    const after = input?.after ?? 0;
+    const limit = input?.limit ?? 200;
+    const normalizedAfter = Number.isFinite(after) && after > 0 ? Math.floor(after) : 0;
+    const normalizedLimit = Math.min(Math.max(Math.floor(limit), 1), 1000);
+    const groups = input?.groupId
+      ? [this.getRequiredGroup(input.groupId)]
+      : this.store
+          .listGroupsWithMemberCount()
+          .filter((group) =>
+            this.store
+              .listGroupMembers(group.groupId)
+              .some((member) => member.nodeId === this.identity.nodeId)
+          );
+    const groupByConversationId = new Map(
+      groups.map((group) => [group.conversationId, group] as const)
+    );
+    const conversationIds = [...groupByConversationId.keys()];
+    const events = this.store.listEventsByConversations(
+      conversationIds,
+      normalizedAfter,
+      normalizedLimit
+    );
+    const items = events
+      .filter((event) => event.kind === "message")
+      .filter((event) => !parseGroupControlEvent(event.payload.content))
+      .map((event) => {
+        const group = groupByConversationId.get(event.conversationId);
+
+        if (!group) {
+          return null;
+        }
+
+        return {
+          localSeq: event.localSeq,
+          groupId: group.groupId,
+          groupName: group.name,
+          conversationId: event.conversationId,
+          event: toMeshEvent(event)
+        } satisfies GroupInboxItem;
+      })
+      .filter((item): item is GroupInboxItem => item !== null);
+
+    return {
+      after: normalizedAfter,
+      nextAfter: items.length > 0 ? items[items.length - 1].localSeq : normalizedAfter,
+      items
+    };
+  }
+
   public getIdentityBinding(chain = "solana"): IdentityBindingView | null {
     const normalizedChain = normalizeIdentityChain(chain);
     const binding = this.store.getIdentityBinding(normalizedChain);
@@ -1432,6 +1810,7 @@ export class MeshNode extends EventEmitter {
     const insertResult = this.store.insertEvents(orderedEvents);
 
     for (const event of insertResult.inserted) {
+      this.applyDerivedStateFromStoredEvent(event);
       this.emit("event", event);
     }
 
@@ -1499,6 +1878,132 @@ export class MeshNode extends EventEmitter {
     };
   }
 
+  private getRequiredGroup(groupIdInput: string): GroupWithMemberCount {
+    const groupId = normalizeGroupId(groupIdInput);
+    const group = this.store
+      .listGroupsWithMemberCount()
+      .find((item) => item.groupId === groupId);
+
+    if (!group) {
+      throw new Error("group not found");
+    }
+
+    return group;
+  }
+
+  private getRequiredGroupSummary(groupIdInput: string): GroupSummary {
+    return toGroupSummary(this.getRequiredGroup(groupIdInput));
+  }
+
+  private resolvePeerUrlsForNodeIds(nodeIds: string[]): string[] {
+    const urls: string[] = [];
+
+    for (const nodeId of nodeIds) {
+      for (const peerUrl of this.store.findPeerUrlsByNodeId(nodeId)) {
+        urls.push(peerUrl);
+      }
+    }
+
+    return dedupeUrls(urls);
+  }
+
+  private toGroupControlUnsignedEvent(
+    controlEvent: GroupControlEvent,
+    conversationId: string,
+    clientMsgId?: string
+  ): UnsignedMeshEvent {
+    return {
+      conversationId,
+      senderId: this.identity.nodeId,
+      senderPubKey: this.identity.publicKeyB64,
+      clientMsgId: clientMsgId?.trim() || randomUUID(),
+      kind: "message",
+      lamport: this.store.nextLamport(conversationId),
+      wallTime: controlEvent.issuedAt,
+      payload: {
+        content: encodeGroupControlEvent(controlEvent)
+      }
+    };
+  }
+
+  private applyDerivedStateFromStoredEvent(event: StoredMeshEvent): void {
+    if (event.kind !== "message") {
+      return;
+    }
+
+    const controlEvent = parseGroupControlEvent(event.payload.content);
+
+    if (!controlEvent) {
+      return;
+    }
+
+    this.applyGroupControlEvent(controlEvent, event.wallTime);
+  }
+
+  private applyGroupControlEvent(
+    controlEvent: GroupControlEvent,
+    wallTime: string
+  ): void {
+    const groupId = normalizeGroupId(controlEvent.groupId);
+    const conversationId = groupConversationId(groupId);
+
+    if (controlEvent.type === "group.created") {
+      this.store.createConversation(conversationId);
+      this.store.upsertGroup({
+        groupId,
+        conversationId,
+        name: normalizeGroupName(controlEvent.name),
+        createdByNodeId: normalizeGroupMemberNodeId(controlEvent.actorNodeId),
+        createdAt: controlEvent.issuedAt || wallTime,
+        updatedAt: wallTime
+      });
+
+      for (const memberNodeId of dedupeNodeIds(controlEvent.memberNodeIds)) {
+        this.store.upsertGroupMember({
+          groupId,
+          nodeId: normalizeGroupMemberNodeId(memberNodeId),
+          addedByNodeId: normalizeGroupMemberNodeId(controlEvent.actorNodeId),
+          addedAt: controlEvent.issuedAt || wallTime,
+          updatedAt: wallTime
+        });
+      }
+
+      return;
+    }
+
+    const existingGroup = this.store.getGroup(groupId);
+
+    if (!existingGroup) {
+      this.store.createConversation(conversationId);
+      this.store.upsertGroup({
+        groupId,
+        conversationId,
+        name: `group-${groupId.slice(0, 8)}`,
+        createdByNodeId: normalizeGroupMemberNodeId(controlEvent.actorNodeId),
+        createdAt: controlEvent.issuedAt || wallTime,
+        updatedAt: wallTime
+      });
+    }
+
+    if (controlEvent.type === "group.member_added") {
+      this.store.upsertGroupMember({
+        groupId,
+        nodeId: normalizeGroupMemberNodeId(controlEvent.nodeId),
+        addedByNodeId: normalizeGroupMemberNodeId(controlEvent.actorNodeId),
+        addedAt: controlEvent.issuedAt || wallTime,
+        updatedAt: wallTime
+      });
+      return;
+    }
+
+    if (controlEvent.type === "group.member_removed") {
+      this.store.removeGroupMember(
+        groupId,
+        normalizeGroupMemberNodeId(controlEvent.nodeId)
+      );
+    }
+  }
+
   private persistAndFanout(
     unsignedEvent: UnsignedMeshEvent,
     targetPeerUrls?: string[]
@@ -1520,6 +2025,7 @@ export class MeshNode extends EventEmitter {
       const storedEvent = this.store.getEventById(event.id);
 
       if (storedEvent) {
+        this.applyDerivedStateFromStoredEvent(storedEvent);
         this.emit("event", storedEvent);
       }
 
@@ -1820,6 +2326,132 @@ function directConversationId(nodeA: string, nodeB: string): string {
   return `dm:${pair[0]}:${pair[1]}`;
 }
 
+function groupConversationId(groupId: string): string {
+  return `${GROUP_CONVERSATION_PREFIX}${groupId}`;
+}
+
+function normalizeGroupId(rawGroupId: string): string {
+  const groupId = rawGroupId.trim();
+
+  if (!groupId) {
+    throw new Error("groupId is required");
+  }
+
+  if (groupId.length > 120) {
+    throw new Error("groupId exceeds max length 120");
+  }
+
+  if (!/^[a-zA-Z0-9:_-]+$/.test(groupId)) {
+    throw new Error("groupId contains unsupported characters");
+  }
+
+  return groupId;
+}
+
+function normalizeGroupName(rawGroupName: string): string {
+  const groupName = rawGroupName.trim();
+
+  if (!groupName) {
+    throw new Error("name is required");
+  }
+
+  if (groupName.length > 120) {
+    throw new Error("name exceeds max length 120");
+  }
+
+  return groupName;
+}
+
+function normalizeGroupMemberNodeId(rawNodeId: string): string {
+  const nodeId = rawNodeId.trim();
+
+  if (!nodeId) {
+    throw new Error("nodeId is required");
+  }
+
+  if (nodeId.length > 256) {
+    throw new Error("nodeId exceeds max length 256");
+  }
+
+  return nodeId;
+}
+
+function dedupeNodeIds(nodeIds: string[]): string[] {
+  return [...new Set(nodeIds)];
+}
+
+function encodeGroupControlEvent(controlEvent: GroupControlEvent): string {
+  return `${GROUP_CONTROL_PREFIX}${JSON.stringify(controlEvent)}`;
+}
+
+function parseGroupControlEvent(content: string): GroupControlEvent | null {
+  if (!content.startsWith(GROUP_CONTROL_PREFIX)) {
+    return null;
+  }
+
+  const rawJson = content.slice(GROUP_CONTROL_PREFIX.length);
+
+  try {
+    const parsed = JSON.parse(rawJson) as unknown;
+
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+
+    const record = parsed as Record<string, unknown>;
+    const type = record.type;
+    const groupId = record.groupId;
+    const actorNodeId = record.actorNodeId;
+    const issuedAt = record.issuedAt;
+
+    if (
+      typeof type !== "string" ||
+      typeof groupId !== "string" ||
+      typeof actorNodeId !== "string" ||
+      typeof issuedAt !== "string"
+    ) {
+      return null;
+    }
+
+    if (type === "group.created") {
+      if (typeof record.name !== "string" || !Array.isArray(record.memberNodeIds)) {
+        return null;
+      }
+
+      const memberNodeIds = record.memberNodeIds.filter(
+        (item): item is string => typeof item === "string"
+      );
+
+      return {
+        type,
+        groupId,
+        name: record.name,
+        memberNodeIds,
+        actorNodeId,
+        issuedAt
+      };
+    }
+
+    if (type === "group.member_added" || type === "group.member_removed") {
+      if (typeof record.nodeId !== "string") {
+        return null;
+      }
+
+      return {
+        type,
+        groupId,
+        nodeId: record.nodeId,
+        actorNodeId,
+        issuedAt
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
 function dedupeUrls(urls: string[]): string[] {
   return [...new Set(urls)];
 }
@@ -1880,6 +2512,28 @@ function toContactProfile(contact: AgentContactRecord): AgentContactProfile {
     capabilities: contact.capabilities,
     notes: contact.notes,
     updatedAt: contact.updatedAt
+  };
+}
+
+function toGroupSummary(group: GroupWithMemberCount): GroupSummary {
+  return {
+    groupId: group.groupId,
+    conversationId: group.conversationId,
+    name: group.name,
+    createdByNodeId: group.createdByNodeId,
+    createdAt: group.createdAt,
+    updatedAt: group.updatedAt,
+    memberCount: group.memberCount
+  };
+}
+
+function toGroupMember(member: GroupMemberRecord): GroupMember {
+  return {
+    groupId: member.groupId,
+    nodeId: member.nodeId,
+    addedByNodeId: member.addedByNodeId,
+    addedAt: member.addedAt,
+    updatedAt: member.updatedAt
   };
 }
 
