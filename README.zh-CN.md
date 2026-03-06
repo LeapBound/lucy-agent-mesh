@@ -32,6 +32,61 @@
 
 ---
 
+## 架构图
+
+下面这张图使用 Mermaid，GitHub 首页可直接渲染，展示项目的主要运行边界：
+
+```mermaid
+flowchart TB
+  subgraph Access[Agent 接入层]
+    Codex[Codex / Claude Code]
+    MCP[MCP Server\napps/mcp-server]
+    SDK[TypeScript SDK\npackages/sdk]
+  end
+
+  subgraph NodeA[本地节点 A]
+    HTTPA[node-daemon API\nHTTP / WebSocket]
+    MeshA[MeshNode\n路由 / 同步 / 群组 / 发现]
+    StoreA[SQLite 存储\npackages/storage-sqlite]
+    CoreA[核心协议\npackages/core]
+  end
+
+  subgraph NodeB[本地节点 B]
+    HTTPB[node-daemon API\nHTTP / WebSocket]
+    MeshB[MeshNode\n路由 / 同步 / 群组 / 发现]
+    StoreB[SQLite 存储\npackages/storage-sqlite]
+    CoreB[核心协议\npackages/core]
+  end
+
+  Net[用户自管网络\n局域网 / VPN / 隧道]
+  Solana[可选 Solana\n身份绑定]
+
+  Codex --> MCP
+  Codex --> SDK
+  MCP --> HTTPA
+  SDK --> HTTPA
+
+  HTTPA --> MeshA
+  MeshA --> StoreA
+  MeshA --> CoreA
+
+  HTTPB --> MeshB
+  MeshB --> StoreB
+  MeshB --> CoreB
+
+  MeshA <--> |P2P 同步 / 路由 / 发现| MeshB
+  MeshA --- Net
+  MeshB --- Net
+  MeshA -. 绑定 / 校验 .-> Solana
+  MeshB -. 绑定 / 校验 .-> Solana
+```
+
+- `node-daemon` 是每个 agent 节点的本地运行时。
+- `MeshNode` 负责 mesh 业务逻辑，`packages/core` 和 `packages/storage-sqlite` 分别提供协议抽象与本地持久化。
+- Agent 可通过 MCP（`stdio`）或 TypeScript SDK 接入；节点之间的真实可达性由用户自己的网络方案提供。
+
+---
+
 ## 适用场景与特性
 
 - 去中心化同步：没有中心消息中枢，使用确定性排序与增量同步

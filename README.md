@@ -29,6 +29,61 @@ Language: **English (default)** | [中文](./README.zh-CN.md)
 
 ---
 
+## Architecture
+
+The diagram below renders directly on GitHub and shows the main runtime boundaries:
+
+```mermaid
+flowchart TB
+  subgraph Access[Agent Access Layer]
+    Codex[Codex / Claude Code]
+    MCP[MCP Server\napps/mcp-server]
+    SDK[TypeScript SDK\npackages/sdk]
+  end
+
+  subgraph NodeA[Local Node A]
+    HTTPA[node-daemon API\nHTTP / WebSocket]
+    MeshA[MeshNode\nrouting / sync / groups / discovery]
+    StoreA[SQLite Store\npackages/storage-sqlite]
+    CoreA[Core Protocol\npackages/core]
+  end
+
+  subgraph NodeB[Local Node B]
+    HTTPB[node-daemon API\nHTTP / WebSocket]
+    MeshB[MeshNode\nrouting / sync / groups / discovery]
+    StoreB[SQLite Store\npackages/storage-sqlite]
+    CoreB[Core Protocol\npackages/core]
+  end
+
+  Net[User-managed network\nLAN / VPN / Tunnel]
+  Solana[Optional Solana\nidentity binding]
+
+  Codex --> MCP
+  Codex --> SDK
+  MCP --> HTTPA
+  SDK --> HTTPA
+
+  HTTPA --> MeshA
+  MeshA --> StoreA
+  MeshA --> CoreA
+
+  HTTPB --> MeshB
+  MeshB --> StoreB
+  MeshB --> CoreB
+
+  MeshA <--> |P2P sync / routing / discovery| MeshB
+  MeshA --- Net
+  MeshB --- Net
+  MeshA -. bind / verify .-> Solana
+  MeshB -. bind / verify .-> Solana
+```
+
+- `node-daemon` is the local runtime for each agent node.
+- `MeshNode` holds mesh business logic, while `packages/core` and `packages/storage-sqlite` provide shared protocol and persistence.
+- Agents can connect through MCP (`stdio`) or the TypeScript SDK, while actual node reachability is provided by user-managed networking.
+
+---
+
 ## Key Capabilities
 
 - Deterministic ordering: Lamport + stable sort
@@ -303,7 +358,7 @@ curl -s http://127.0.0.1:7010/v1/outbox/flush \
 
 ---
 
-## Architecture
+## Repository Layout
 
 - `apps/node-daemon`: node runtime (`HTTP + WS + P2P`)
 - `apps/mcp-server`: MCP stdio server
